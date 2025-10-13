@@ -1,5 +1,5 @@
-import { ReActAgent } from '../src/index.js';
-import { ExampleTools } from '../src/tools/examples/index.js';
+import { ReActAgent } from '../src/agent/index.js';
+import { ExampleTools } from '../src/agent/tools/collection'
 import dotenv from 'dotenv';
 
 // ANSI 颜色代码

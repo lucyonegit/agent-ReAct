@@ -15,12 +15,12 @@ export type {
 } from './types/index.js';
 
 // 示例工具导出
-export { ExampleTools } from './tools/examples/index.js';
+export { ExampleTools } from './tools/collection/index.js';
 
 // 便捷创建函数
 import { ReActAgent } from './core/ReActAgent.js';
 import { StreamManager, createConsoleStreamHandler } from './stream/StreamManager.js';
-import { ExampleTools } from './tools/examples/index.js';
+import { ExampleTools } from './tools/collection/index.js';
 import { AgentConfig } from './types/index.js';
 
 /**
