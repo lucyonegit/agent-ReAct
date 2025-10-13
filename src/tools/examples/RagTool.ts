@@ -25,7 +25,7 @@ interface ErrorResponse {
  */
 export const RagQueryTool: ToolDefinition = {
   name: 'rag_query',
-  description: '执行RAG检索增强生成查询，从向量数据库中搜索相关文档并生成回答',
+  description: '这是一份考勤制度的文档，执行RAG检索增强生成查询，从向量数据库中搜索相关文档并生成回答',
   parameters: [
     {
       name: 'query',

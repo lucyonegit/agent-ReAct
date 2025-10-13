@@ -31,28 +31,6 @@ const highlight = (text: string, bgColor: string, textColor: string = colors.whi
 dotenv.config();
 
 
-async function basicQwenUsage() {
-  console.log(highlight('=== 基础千问模型使用 ===', colors.bgBlue));
-  
-  // 创建使用千问模型的Agent
-  const agent = new ReActAgent({
-    model: 'qwen-max',  // 使用千问Plus模型
-    temperature: 0.7,
-    maxTokens: 2000,
-    streamOutput: false,
-  });
-
-  // 注册示例工具
-  agent.getToolRegistry().registerTools(ExampleTools);
-
-  try {
-    const result = await agent.run('帮我计算 15 * 23 的结果');
-    console.log(colorize('结果:', colors.green), result);
-  } catch (error) {
-    console.error(colorize('错误:', colors.red), error);
-  }
-}
-
 async function streamingQwenUsage() {
   console.log(highlight('基础千问模型使用', colors.bgBlue));
   
@@ -67,7 +45,7 @@ async function streamingQwenUsage() {
 
   try {
     const result = await agent.run(
-      '帮我基于React写一个Button组件',
+      '帮我查一下迟到会不会扣钱，如果会，我要怎么处理',
       (event) => {
         const conversationId = event.conversationId;
         const streamManager = agent.getStreamManager();

@@ -15,13 +15,7 @@ export type {
 } from './types/index.js';
 
 // 示例工具导出
-export { 
-  CalculatorTool, 
-  WeatherTool, 
-  SearchTool, 
-  ExampleTools,
-  ToolDescriptions 
-} from './tools/examples/index.js';
+export { ExampleTools } from './tools/examples/index.js';
 
 // 便捷创建函数
 import { ReActAgent } from './core/ReActAgent.js';
@@ -32,19 +26,12 @@ import { AgentConfig } from './types/index.js';
 /**
  * 创建一个预配置的ReAct Agent
  * @param config Agent配置
- * @param includeExampleTools 是否包含示例工具
  * @returns 配置好的Agent实例
  */
 export function createReActAgent(
   config: Partial<AgentConfig> = {},
-  includeExampleTools: boolean = true
 ): ReActAgent {
   const agent = new ReActAgent(config);
-  
-  if (includeExampleTools) {
-    agent.registerTools(ExampleTools);
-  }
-  
   return agent;
 }
 
@@ -55,10 +42,9 @@ export function createReActAgent(
  * @returns Agent实例和流管理器
  */
 export function createStreamingReActAgent(
-  config: Partial<AgentConfig> = {},
-  includeExampleTools: boolean = true
+  config: Partial<AgentConfig> = {}
 ): { agent: ReActAgent; streamManager: StreamManager } {
-  const agent = createReActAgent({ ...config, streamOutput: true }, includeExampleTools);
+  const agent = createReActAgent({ ...config, streamOutput: true });
   const streamManager = new StreamManager();
   
   return { agent, streamManager };
