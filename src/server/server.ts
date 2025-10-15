@@ -42,7 +42,7 @@ app.get('/health', (_req: Request, res: Response) => {
 
 /**
  * SSE endpoint
- * GET /api/agent/stream?prompt=...&language=chinese|english&model=...&sessionId=...
+ * GET /api/agent/stream?prompt=...&language=chinese|english&model=...&sessionId=...&conversationId=...&pauseAfterEachStep=true
  */
 type LanguageOption = 'chinese' | 'english' | 'auto';
 
@@ -52,6 +52,8 @@ app.get('/api/agent/stream', async (req: Request, res: Response) => {
   const model = (req.query.model as string) || 'qwen-plus';
   const temperature = req.query.temperature !== undefined ? Number(req.query.temperature) : 0.7;
   const sessionId = (req.query.sessionId as string) || undefined; // 支持传入 sessionId 继续会话
+  const conversationId = (req.query.conversationId as string) || undefined; // 支持传入 conversationId 恢复暂停的对话
+  const pauseAfterEachStep = req.query.pauseAfterEachStep === 'true'; // 是否在每步后暂停
 
   if (!prompt) {
     res.status(400).json({ error: 'prompt is required' });
@@ -65,7 +67,8 @@ app.get('/api/agent/stream', async (req: Request, res: Response) => {
     model,
     temperature,
     streamOutput: true,
-    language
+    language,
+    pauseAfterEachStep  // 传递暂停配置
   });
 
   // 注册示例工具（若存在）
@@ -91,14 +94,16 @@ app.get('/api/agent/stream', async (req: Request, res: Response) => {
   };
 
   try {
-    // 使用 runWithSession 支持多轮对话
-    const result = await agent.runWithSession(prompt, { sessionId, onStream });
+    // 使用 runWithSession 支持多轮对话和暂停/恢复
+    const result = await agent.runWithSession(prompt, { sessionId, conversationId, onStream });
     
-    // 发送结束信号，带上 sessionId 和 conversationId
+    // 发送结束信号，带上 sessionId、conversationId 和 isPaused 状态
     sendSSE(res, 'done', { 
       ok: true, 
       sessionId: result.sessionId,
-      conversationId: result.conversationId
+      conversationId: result.conversationId,
+      isPaused: result.isPaused,  // 告诉前端是否处于暂停状态
+      message: result.isPaused ? '等待用户输入...' : '对话完成'
     });
     res.end();
   } catch (err: any) {

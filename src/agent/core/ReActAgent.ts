@@ -15,11 +15,22 @@ import {
   ConversationEvent,
   NormalEventData,
   TaskPlanEventData,
-  ToolCallEventData
+  ToolCallEventData,
+  WaitingInputEventData
 } from '../types/index.js';
 import { prompt } from './config/prompt';
 
 
+
+// 会话状态存储类型
+interface SessionState {
+  context: AgentContext;
+  currentIteration: number;
+  sessionId: string;
+  conversationId: string;
+  isPaused: boolean;
+  waitingReason?: string;
+}
 
 // 使用类型定义中的 TaskStep
 
@@ -35,9 +46,15 @@ export class ReActAgent {
 
   // 共享的 Planner 计划列表（在一次 run 的多轮 ReAct 中复用与更新）
   private planList: TaskStep[] = [];
+  
+  // 记录上次推送的计划快照，用于检测变化
+  private lastEmittedPlanSnapshot: string = '';
 
   // 会话管理
   private currentSessionId: string | null = null;
+  
+  // 会话状态存储（支持暂停/恢复）
+  private sessionStates: Map<string, SessionState> = new Map();
   
   // 生成唯一ID
   private genId(prefix: string): string {
@@ -76,33 +93,64 @@ export class ReActAgent {
   /**
    * 将下一个 pending 项标记为 doing
    */
-  private markNextPendingDoing(note?: string): void {
+  private markNextPendingDoing(note?: string): boolean {
     const item = this.planList.find(p => p.status === 'pending');
     if (item) {
       item.status = 'doing';
       if (note) item.note = note;
+      return true;  // 返回是否有变化
     }
+    return false;
   }
 
   /**
    * 将当前 doing 项标记为 done
    */
-  private markCurrentStepDone(note?: string): void {
+  private markCurrentStepDone(note?: string): boolean {
     const item = this.planList.find(p => p.status === 'doing');
     if (item) {
       item.status = 'done';
       if (note) item.note = note;
+      return true;  // 返回是否有变化
     }
+    return false;
   }
 
   /**
-   * 通过流事件推送计划更新
+   * 生成计划快照用于比较
+   */
+  private getPlanSnapshot(): string {
+    return JSON.stringify(this.planList.map(p => ({
+      id: p.id,
+      title: p.title,
+      status: p.status,
+      note: p.note
+    })));
+  }
+
+  /**
+   * 通过流事件推送计划更新（仅在有变化时推送）
    */
   private emitPlanUpdate(
     sessionId: string,
     conversationId: string, 
-    onStream?: (e: StreamEvent) => void
+    onStream?: (e: StreamEvent) => void,
+    force: boolean = false  // 强制推送
   ): void {
+    const currentSnapshot = this.getPlanSnapshot();
+    
+    // 检查是否有变化
+    if (!force && currentSnapshot === this.lastEmittedPlanSnapshot) {
+      console.log('⏭️ 任务计划无变化，跳过推送');
+      return;
+    }
+    
+    console.log('📤 推送任务计划更新:', { 
+      force, 
+      hasChange: currentSnapshot !== this.lastEmittedPlanSnapshot,
+      planCount: this.planList.length 
+    });
+    
     const eventId = this.genId('plan_update');
     this.emitTaskPlan(
       { step: this.planList }, 
@@ -111,6 +159,9 @@ export class ReActAgent {
       eventId, 
       onStream
     );
+    
+    // 更新快照
+    this.lastEmittedPlanSnapshot = currentSnapshot;
   }
 
   /**
@@ -119,50 +170,108 @@ export class ReActAgent {
    */
   async runWithSession(
     input: string,
-    options?: { sessionId?: string; onStream?: (event: StreamEvent) => void }
-  ): Promise<{ sessionId: string; conversationId: string; finalAnswer: string }> {
+    options?: { 
+      sessionId?: string; 
+      conversationId?: string;  // 支持继续已存在的对话
+      onStream?: (event: StreamEvent) => void 
+    }
+  ): Promise<{ sessionId: string; conversationId: string; finalAnswer: string; isPaused: boolean }> {
     const sessionId = options?.sessionId ?? (this.currentSessionId ?? this.genId('sess'));
     this.currentSessionId = sessionId;
-    const conversationId = this.genId('conv');
-    // 生成预处理提示
-    await this.generatePreActionTip(input, conversationId, sessionId, options?.onStream);
+    
+    // 检查是否有暂停的会话需要恢复
+    const existingState = this.sessionStates.get(sessionId);
+    let conversationId: string;
+    let context: AgentContext;
+    let startIteration: number;
+    
+    if (existingState && existingState.isPaused && options?.conversationId) {
+      // 恢复暂停的会话
+      console.log('🔄 恢复暂停的会话:', { sessionId, conversationId: options.conversationId });
+      conversationId = options.conversationId;
+      context = existingState.context;
+      startIteration = existingState.currentIteration;
+      
+      // 添加用户新输入到上下文
+      context.steps.push({
+        type: 'observation',
+        content: `User provided additional input: ${input}`
+      });
+      
+      // 发送用户输入事件
+      this.emitNormal({ 
+        content: `💬 用户输入：${input}` 
+      }, sessionId, conversationId, this.genId('user_input'), options?.onStream);
+      
+      // 清除暂停状态
+      existingState.isPaused = false;
+    } else {
+      // 新对话
+      conversationId = this.genId('conv');
+      context = {
+        input,
+        steps: [],
+        tools: this.toolRegistry.getAllTools(),
+        config: this.config
+      };
+      startIteration = 0;
+      
+      // 重置计划列表和快照（新对话需要重新规划）
+      this.planList = [];
+      this.lastEmittedPlanSnapshot = '';
+      
+      // 生成预处理提示
+      await this.generatePreActionTip(input, conversationId, sessionId, options?.onStream);
+      
+      // 🎯 在对话开始时生成任务计划
+      await this.generatePlan(context, options?.onStream, conversationId, sessionId);
+    }
+    
     // 进入推理循环
-    const finalAnswer = await this.runInternal(input, sessionId, conversationId, options?.onStream);
-    return { sessionId, conversationId, finalAnswer };
+    const result = await this.runInternal(
+      context, 
+      sessionId, 
+      conversationId, 
+      options?.onStream,
+      startIteration
+    );
+    
+    return { 
+      sessionId, 
+      conversationId, 
+      finalAnswer: result.finalAnswer,
+      isPaused: result.isPaused
+    };
   }
 
   /**
    * 内部推理循环（带 session/conversation 语义）
    */
   private async runInternal(
-    input: string,
+    context: AgentContext,
     sessionId: string,
     conversationId: string,
-    onStream?: (event: StreamEvent) => void
-  ): Promise<string> {
-    const context: AgentContext = {
-      input,
-      steps: [],
-      tools: this.toolRegistry.getAllTools(),
-      config: this.config
-    };
+    onStream?: (event: StreamEvent) => void,
+    startIteration: number = 0
+  ): Promise<{ finalAnswer: string; isPaused: boolean }> {
 
-    for (let iteration = 0; iteration < this.config.maxIterations; iteration++) {
+    for (let iteration = startIteration; iteration < this.config.maxIterations; iteration++) {
       try {
-        // 1️⃣ 发送思考事件（独立的 normal_event）
-        const thought = await this.generateThought(context, onStream, conversationId, sessionId);
+        // 🔄 优化：合并思考与决策为一次 LLM 调用
+        const reactResult = await this.reasonAndAct(context, onStream, conversationId, sessionId);
+        
+        // 记录思考步骤
         context.steps.push({
           type: 'thought',
-          content: thought
+          content: reactResult.thought
         });
 
-        // 2️⃣ 决策行动并发送决策事件（独立的 normal_event）
-        const actionDecision = await this.decideAction(context, onStream, conversationId, sessionId);
-        
-        if (actionDecision.type === 'final_answer') {
+        if (reactResult.type === 'final_answer') {
           // 标记当前步骤为完成
-          this.markCurrentStepDone('✅ 已完成');
-          this.emitPlanUpdate(sessionId || 'default', conversationId || 'default', onStream);
+          const hasChange = this.markCurrentStepDone('✅ 已完成');
+          if (hasChange) {
+            this.emitPlanUpdate(sessionId || 'default', conversationId || 'default', onStream);
+          }
           
           // 发送最终答案准备事件
           this.emitNormal({ 
@@ -171,16 +280,37 @@ export class ReActAgent {
           
           // 使用流式生成最终答案
           const finalAnswer = await this.generateFinalAnswer(context, onStream, conversationId, sessionId);
-          return finalAnswer;
+          return { finalAnswer, isPaused: false };
         }
 
-        if (actionDecision.type === 'action') {
+        if (reactResult.type === 'action') {
+          // 检查是否需要等待用户输入
+          if (reactResult.toolName === 'wait_for_user_input') {
+            // 保存当前状态
+            this.sessionStates.set(sessionId, {
+              context,
+              currentIteration: iteration + 1,
+              sessionId,
+              conversationId,
+              isPaused: true,
+              waitingReason: reactResult.toolInput?.reason || '需要更多信息'
+            });
+            
+            // 发送等待输入事件
+            this.emitWaitingInput({
+              message: reactResult.toolInput?.message || '请输入更多信息以继续...',
+              reason: reactResult.toolInput?.reason
+            }, sessionId, conversationId, this.genId('waiting'), onStream);
+            
+            return { finalAnswer: '', isPaused: true };
+          }
+          
           // 执行动作
           const actionStep: ReActStep = {
             type: 'action',
-            content: `Using tool: ${actionDecision.toolName}`,
-            toolName: actionDecision.toolName,
-            toolInput: actionDecision.toolInput
+            content: `Using tool: ${reactResult.toolName}`,
+            toolName: reactResult.toolName,
+            toolInput: reactResult.toolInput
           };
           
           context.steps.push(actionStep);
@@ -189,20 +319,20 @@ export class ReActAgent {
           const toolEventId = `tool_${iteration}_${conversationId || Date.now()}`;
           const toolStartedAt = Date.now();
           
-          console.log('🔧 发送工具调用 START 事件:', { toolEventId, tool: actionDecision.toolName });
+          console.log('🔧 发送工具调用 START 事件:', { toolEventId, tool: reactResult.toolName });
           
           this.emitToolCall({
             id: toolEventId,
             status: 'start',
-            tool_name: actionDecision.toolName!,
-            args: actionDecision.toolInput,
+            tool_name: reactResult.toolName!,
+            args: reactResult.toolInput,
             iteration,
             startedAt: toolStartedAt
           }, sessionId, conversationId, toolEventId, onStream);
           
           const toolResult = await this.toolRegistry.executeTool(
-            actionDecision.toolName!,
-            actionDecision.toolInput
+            reactResult.toolName!,
+            reactResult.toolInput
           );
 
           // 记录观察结果
@@ -213,7 +343,7 @@ export class ReActAgent {
           const observationStep: ReActStep = {
             type: 'observation',
             content: observation,
-            toolName: actionDecision.toolName,
+            toolName: reactResult.toolName,
             toolOutput: toolResult
           };
 
@@ -227,8 +357,8 @@ export class ReActAgent {
           this.emitToolCall({
             id: toolEventId,
             status: 'end',
-            tool_name: actionDecision.toolName!,
-            args: actionDecision.toolInput,
+            tool_name: reactResult.toolName!,
+            args: reactResult.toolInput,
             result: toolResult,
             success: toolResult.success,
             startedAt: toolStartedAt,
@@ -238,12 +368,36 @@ export class ReActAgent {
           }, sessionId, conversationId, toolEventId, onStream);
           
           // 4️⃣ 发送观察事件（独立的 normal_event）
-          await this.generateObservation(toolResult, actionDecision.toolName!, onStream, conversationId, sessionId, iteration);
+          await this.generateObservation(toolResult, reactResult.toolName!, onStream, conversationId, sessionId, iteration);
           
           // 5️⃣ 标记当前步骤完成，推进到下一步
           if (toolResult.success) {
-            this.markCurrentStepDone(`✅ 已使用 ${actionDecision.toolName}`);
-            this.emitPlanUpdate(sessionId || 'default', conversationId || 'default', onStream);
+            const hasChange = this.markCurrentStepDone(`✅ 已使用 ${reactResult.toolName}`);
+            if (hasChange) {
+              this.emitPlanUpdate(sessionId || 'default', conversationId || 'default', onStream);
+            }
+          }
+          
+          // 6️⃣ 检查是否需要在每步后暂停
+          if (this.config.pauseAfterEachStep) {
+            // 保存当前状态
+            this.sessionStates.set(sessionId, {
+              context,
+              currentIteration: iteration + 1,
+              sessionId,
+              conversationId,
+              isPaused: true,
+              waitingReason: '等待用户确认是否继续'
+            });
+            
+            // 发送等待输入事件
+            this.emitWaitingInput({
+              message: '当前步骤已完成，请输入继续执行或提供新的指令...',
+              reason: '人机协作模式 - 每步后等待确认'
+            }, sessionId, conversationId, this.genId('waiting'), onStream);
+            
+            console.log('⏸️ 人机协作模式：已暂停，等待用户输入');
+            return { finalAnswer: '', isPaused: true };
           }
         }
       } catch (error) {
@@ -255,29 +409,23 @@ export class ReActAgent {
 
     // 如果达到最大迭代次数，生成最终答案
     const finalAnswer = await this.generateFinalAnswer(context, onStream, conversationId, sessionId);
-    return finalAnswer;
+    return { finalAnswer, isPaused: false };
   }
 
   /**
-   * 生成初始计划（仅用于演示，可替换为真实 Planner）
+   * 生成任务计划（在对话开始时调用）
    */
-  private async generatePlanIfNeeded(
+  private async generatePlan(
     context: AgentContext,
     onStream?: (event: StreamEvent) => void,
     conversationId?: string,
     sessionId?: string
   ): Promise<void> {
-    if (this.planList && this.planList.length > 0) return;
-
-    // 让 LLM 输出一个 JSON 数组的步骤计划，尽量结构化，失败则使用兜底
-    const sys = this.buildSystemPrompt();
-    const history = this.buildConversationHistory(context);
+    console.log('🎯 开始生成任务计划...');
     const messages = [
-      new SystemMessage(sys),
-      ...history,
-      new HumanMessage(prompt.createPlannerPrompt()),
+      new SystemMessage(prompt.createPlannerPrompt(context.input)),
     ];
-
+    
     try {
       const resp = await this.llm.invoke(messages);
       const txt = (resp.content as string).trim();
@@ -315,16 +463,6 @@ export class ReActAgent {
         { id: 'plan_3', title: '整理观察并撰写答案', status: 'pending' as TaskStatus },
       ];
     }
-
-    // // 推送任务规划卡片
-    // const eventId = this.genId('plan_init');
-    // this.emitTaskPlan(
-    //   { step: this.planList }, 
-    //   sessionId || 'default', 
-    //   conversationId || 'default', 
-    //   eventId, 
-    //   onStream
-    // );
   }
   
   private async generatePreActionTip(
@@ -348,197 +486,189 @@ export class ReActAgent {
   }
 
   /**
-   * 生成思考步骤（作为独立的 normal_event）
+   * 🔄 优化：合并思考与决策为一次 LLM 调用（符合标准 ReAct 模式）
+   * ReAct 循环：Thought → Action → Observation
    */
-  private async generateThought(
-    context: AgentContext, 
-    onStream?: (event: StreamEvent) => void,
-    conversationId?: string,
-    sessionId?: string
-  ): Promise<string> {
-    // 1) 确保本轮共享的计划已生成
-    await this.generatePlanIfNeeded(context, onStream, conversationId, sessionId);
-    // 2) 如果当前没有进行中的步骤，则推进一个 pending 为 doing
-    const hasDoing = this.planList.some((p) => p.status === 'doing');
-    if (!hasDoing) {
-      this.markNextPendingDoing('开始本步骤推理');
-      this.emitPlanUpdate(sessionId || 'default', conversationId || 'default', onStream);
-    }
-
-    const currentStep =
-      this.planList.find((p) => p.status === 'doing') ||
-      this.planList.find((p) => p.status === 'pending');
-
-    const systemPrompt = this.buildSystemPrompt();
-    const conversationHistory = this.buildConversationHistory(context);
-
-    const messages = [
-      new SystemMessage(systemPrompt),
-      new SystemMessage(`Current plan step: ${currentStep ? currentStep.title : 'General reasoning'}
-Your task now: reason specifically for this step, think step-by-step, and determine the next logical action for THIS step.`),
-      ...conversationHistory,
-      new HumanMessage(`
-        Based on the conversation so far, what should I think about next?
-        
-        CRITICAL REQUIREMENTS:
-        1. Output ONLY 1-2 sentences (maximum 50 Chinese characters)
-        2. State ONLY what you're thinking about RIGHT NOW
-        3. NO explanations, NO details, NO reasoning process
-        4. Just the current thought, nothing more
-        
-        ✅ Good examples:
-        "需要查询李白的信息"
-        "分析用户问题的关键要素"
-        "准备使用搜索工具"
-        
-        ❌ Bad examples (TOO LONG, avoid):
-        "首先我需要理解用户的问题，用户想要了解..."
-        "让我来分析一下这个问题的各个方面..."
-      `)
-    ];
-
-    const streamEventId = `thought_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    
-    // 如果启用了流式输出且有回调函数
-    if (this.config.streamOutput && onStream) {
-      // 流式模式
-      const stream = await this.llm.stream(messages);
-      let fullContent = '';
-      
-      for await (const chunk of stream) {
-        const content = chunk.content as string;
-        if (content) {
-          fullContent += content;
-          this.emitNormal({ content, stream: true }, sessionId || 'default', conversationId || 'default', streamEventId, onStream);
-        }
-      }
-      
-      this.emitNormal({ content: '', stream: true, done: true }, sessionId || 'default', conversationId || 'default', streamEventId, onStream);
-      return fullContent;
-    } else {
-      // 非流式模式
-      const response = await this.llm.invoke(messages);
-      const content = response.content as string;
-      
-      if (onStream) {
-        this.emitNormal({ content }, sessionId || 'default', conversationId || 'default', streamEventId, onStream);
-      }
-      
-      return content;
-    }
-  }
-
-  /**
-   * 决定下一步动作（作为独立的 normal_event）
-   */
-  private async decideAction(
+  private async reasonAndAct(
     context: AgentContext,
     onStream?: (event: StreamEvent) => void,
     conversationId?: string,
     sessionId?: string
   ): Promise<{
     type: 'action' | 'final_answer';
+    thought: string;
     content?: string;
     toolName?: string;
     toolInput?: any;
   }> {
-    const systemPrompt = this.buildSystemPrompt();
+    // 推进计划步骤
+    const hasDoing = this.planList.some((p) => p.status === 'doing');
+    if (!hasDoing) {
+      const hasChange = this.markNextPendingDoing('🤔 正在推理');
+      if (hasChange) {
+        this.emitPlanUpdate(sessionId || 'default', conversationId || 'default', onStream);
+      }
+    }
+
+    const currentStep =
+      this.planList.find((p) => p.status === 'doing') ||
+      this.planList.find((p) => p.status === 'pending');
+
+    const systemPrompt = this.buildReActPrompt(currentStep);
     const conversationHistory = this.buildConversationHistory(context);
     const toolsDescription = this.toolRegistry.getToolsDescription();
 
     const messages = [
       new SystemMessage(systemPrompt),
       ...conversationHistory,
-      new HumanMessage(`
-        Available tools:
-        ${toolsDescription}
-        
-        Based on your previous thought, decide what to do next:
-        1. If you need to use a tool, respond EXACTLY in this format:
-        Action: [tool_name]
-        Input: [tool_input_as_json]
-        
-        2. If you have enough information to provide a final answer, respond with:
-        Final Answer: [your_complete_answer]
-        
-        IMPORTANT: 
-        - Do NOT add extra explanation
-        - Do NOT repeat the thought process
-        - ONLY output the Action/Input OR Final Answer
-        - Keep it SHORT and DIRECT
-      `)
+      new HumanMessage(`Follow the ReAct format:
+
+Thought: [Brief reasoning about what to do next - 1-2 sentences]
+Action: [tool_name] OR Final Answer: [your answer]
+Input: [tool_input_json] (only if Action is used)
+
+Available tools:
+${toolsDescription}
+
+Remember: Keep Thought CONCISE. Output ONLY the above format.`)
     ];
 
     const response = await this.llm.invoke(messages);
     const content = response.content as string;
 
-    // 解析响应
+    // 解析 ReAct 格式输出
+    const parsed = this.parseReActOutput(content);
+    
+    // 发送思考事件（简洁版）
+    if (parsed.thought && onStream) {
+      this.emitNormal({ 
+        content: `💭 ${parsed.thought}` 
+      }, sessionId || 'default', conversationId || 'default', this.genId('thought'), onStream);
+    }
+
+    // 如果是工具调用，发送友好提示
+    if (parsed.type === 'action' && parsed.toolName && onStream) {
+      const friendlyMessage = this.formatFriendlyToolMessage(parsed.toolName, parsed.toolInput);
+      if (friendlyMessage) {
+        this.emitNormal({ 
+          content: friendlyMessage
+        }, sessionId || 'default', conversationId || 'default', this.genId('action'), onStream);
+      }
+    }
+
+    return parsed;
+  }
+
+  /**
+   * 🆕 解析 ReAct 格式的 LLM 输出
+   */
+  private parseReActOutput(content: string): {
+    type: 'action' | 'final_answer';
+    thought: string;
+    content?: string;
+    toolName?: string;
+    toolInput?: any;
+  } {
+    // 提取 Thought
+    const thoughtMatch = content.match(/Thought:\s*(.+?)(?=\n(?:Action:|Final Answer:)|$)/s);
+    const thought = thoughtMatch ? thoughtMatch[1].trim() : '';
+
+    // 检查是否是最终答案
     if (content.includes('Final Answer:')) {
-      const finalAnswer = content.split('Final Answer:')[1].trim();
+      const finalAnswerMatch = content.match(/Final Answer:\s*(.+)/s);
+      const finalAnswer = finalAnswerMatch ? finalAnswerMatch[1].trim() : '';
       return {
         type: 'final_answer',
+        thought,
         content: finalAnswer
       };
     }
 
+    // 解析工具调用
     if (content.includes('Action:')) {
-      const actionMatch = content.match(/Action:\s*(.+)/);
+      const actionMatch = content.match(/Action:\s*([^\n]+)/);
       const inputMatch = content.match(/Input:\s*(.+)/s);
       
       if (actionMatch) {
         const toolName = actionMatch[1].trim();
-        let toolInput = {};
+        let toolInput: any = {};
         
         if (inputMatch) {
           try {
             const inputStr = inputMatch[1].trim();
-            // 尝试提取 JSON 部分
+            // 更严格的 JSON 提取
             const jsonMatch = inputStr.match(/\{[\s\S]*\}/);
             if (jsonMatch) {
               toolInput = JSON.parse(jsonMatch[0]);
             } else {
+              // 尝试直接解析
               toolInput = JSON.parse(inputStr);
             }
-          } catch {
-            // 如果JSON解析失败，使用原始字符串
+          } catch (e) {
+            console.warn('⚠️ JSON 解析失败，使用原始字符串:', inputMatch[1]);
             toolInput = { input: inputMatch[1].trim() };
           }
         }
 
-        // 发送行动决策事件（独立的 normal_event）
-        const actionEventId = `action_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        const actionDescription = this.formatActionDescription(toolName, toolInput);
-        
-        if (onStream) {
-          this.emitNormal({ 
-            content: actionDescription
-          }, sessionId || 'default', conversationId || 'default', actionEventId, onStream);
-        }
-
         return {
           type: 'action',
+          thought,
           toolName,
           toolInput
         };
       }
     }
 
-    // 默认返回思考更多
+    // 兜底：如果解析失败，返回思考更多
+    console.warn('⚠️ ReAct 输出解析失败，使用思考模式');
     return {
       type: 'action',
-      toolName: 'think_more',
+      thought: content,
+      toolName: 'continue_thinking',
       toolInput: { thought: content }
     };
   }
 
   /**
-   * 格式化行动描述
+   * 🆕 构建优化的 ReAct 提示词
    */
-  private formatActionDescription(toolName: string, toolInput: any): string {
-    const inputStr = typeof toolInput === 'object' 
-      ? Object.entries(toolInput).map(([k, v]) => `${k}: ${v}`).join(', ')
-      : String(toolInput);
-    return `🎯 准备执行工具: ${toolName}\n参数: ${inputStr}`;
+  private buildReActPrompt(currentStep?: TaskStep): string {
+    const languageInstructions = prompt.createLanguagePrompt();
+    const basePrompt = prompt.createSystemPrompt(languageInstructions);
+    
+    if (currentStep) {
+      return `${basePrompt}
+
+**Current Task Step**: ${currentStep.title}
+Focus on completing this step efficiently.`;
+    }
+    
+    return basePrompt;
+  }
+
+  /**
+   * 格式化友好的工具提示消息
+   */
+  private formatFriendlyToolMessage(toolName: string, toolInput: any): string {
+    // 根据不同工具生成友好的提示信息
+    const toolMessages: Record<string, (input: any) => string> = {
+      'search': (input) => `🔍 正在搜索：${input.query || input.input || '相关信息'}...`,
+      'web_search': (input) => `🌐 正在联网搜索：${input.query || input.input || ''}...`,
+      'read_file': (input) => `📖 正在读取文件：${input.file_path || input.path || ''}...`,
+      'write_file': (input) => `✍️ 正在写入文件：${input.file_path || input.path || ''}...`,
+      'execute_code': (input) => `⚙️ 正在执行代码...`,
+      'calculate': (input) => `🧮 正在计算：${input.expression || ''}...`,
+      'rag_search': (input) => `📚 正在知识库中查找相关信息...`,
+      'wait_for_user_input': (input) => '', // 这个工具不需要额外提示
+    };
+
+    // 如果有定制的友好消息，使用它
+    if (toolMessages[toolName]) {
+      return toolMessages[toolName](toolInput);
+    }
+
+    // 默认通用提示
+    return `🔧 正在执行操作...`;
   }
 
   /**
@@ -596,7 +726,8 @@ Your task now: reason specifically for this step, think step-by-step, and determ
     conversationId?: string,
     sessionId?: string
   ): Promise<string> {
-    const systemPrompt = this.buildSystemPrompt();
+    const languageInstructions = prompt.createLanguagePrompt();
+    const systemPrompt = prompt.createSystemPrompt(languageInstructions);
     const conversationHistory = this.buildConversationHistory(context);
     
     const messages = [
@@ -641,36 +772,37 @@ Please be concise and direct in your response.`)
   }
 
   /**
-   * 构建系统提示
-   */
-  private buildSystemPrompt(): string {
-    // TODO: 语言指令
-    const languageInstructions = prompt.createLanguagePrompt();
-    return prompt.createSystemPrompt(languageInstructions);
-  }
-
-  /**
-   * 构建对话历史
+   * 构建对话历史（优化版 - 更简洁）
    */
   private buildConversationHistory(context: AgentContext): (HumanMessage | AIMessage)[] {
     const messages: (HumanMessage | AIMessage)[] = [
-      new HumanMessage(`Question: ${context.input}`)
+      new HumanMessage(`User Question: ${context.input}`)
     ];
 
-    for (const step of context.steps) {
+    // 只保留最近的 ReAct 步骤（避免上下文过长）
+    const recentSteps = context.steps.slice(-6); // 保留最近6步
+    
+    for (const step of recentSteps) {
       if (step.type === 'thought') {
         messages.push(new AIMessage(`Thought: ${step.content}`));
       } else if (step.type === 'action') {
-        messages.push(new AIMessage(`Action: ${step.content}`));
-        if (step.toolInput) {
-          messages.push(new AIMessage(`Input: ${JSON.stringify(step.toolInput)}`));
-        }
+        messages.push(new AIMessage(`Action: ${step.toolName || 'unknown'}\nInput: ${JSON.stringify(step.toolInput)}`));
       } else if (step.type === 'observation') {
-        messages.push(new AIMessage(`Observation: ${step.content}`));
+        // 简化观察结果，避免过长
+        const observationContent = this.truncateObservation(step.content);
+        messages.push(new AIMessage(`Observation: ${observationContent}`));
       }
     }
 
     return messages;
+  }
+
+  /**
+   * 截断过长的观察结果
+   */
+  private truncateObservation(content: string, maxLength: number = 500): string {
+    if (content.length <= maxLength) return content;
+    return content.slice(0, maxLength) + '... (truncated)';
   }
 
   /**
@@ -764,6 +896,28 @@ Please be concise and direct in your response.`)
     
     console.log('📤 emitToolCall 调用:', { eventId, status: data.status, tool: data.tool_name });
     console.log('📤 完整事件对象:', JSON.stringify(event, null, 2));
+    
+    this.emitStreamEvent(sessionId, conversationId, event, onStream);
+  }
+
+  /**
+   * 发送等待用户输入事件
+   */
+  private emitWaitingInput(
+    data: { message: string; reason?: string },
+    sessionId: string,
+    conversationId: string,
+    eventId: string,
+    onStream?: (e: StreamEvent) => void
+  ): void {
+    const event: WaitingInputEventData = {
+      id: eventId,
+      role: 'assistant',
+      type: 'waiting_input_event',
+      data
+    };
+    
+    console.log('⏸️ 发送等待输入事件:', { eventId, message: data.message });
     
     this.emitStreamEvent(sessionId, conversationId, event, onStream);
   }

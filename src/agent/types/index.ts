@@ -41,6 +41,7 @@ export const AgentConfigSchema = z.object({
   maxIterations: z.number().positive().default(10),
   streamOutput: z.boolean().default(true),
   language: z.enum(['auto', 'chinese', 'english']).default('auto'),
+  pauseAfterEachStep: z.boolean().default(false), // 每步后暂停等待用户确认
 });
 
 // 导出类型
@@ -53,7 +54,7 @@ export type AgentConfig = z.infer<typeof AgentConfigSchema>;
 // ============= 新的对话结构类型定义 =============
 
 // 事件类型
-export type EventType = 'normal_event' | 'task_plan_event' | 'tool_call_event';
+export type EventType = 'normal_event' | 'task_plan_event' | 'tool_call_event' | 'waiting_input_event';
 
 // 任务状态
 export type TaskStatus = 'pending' | 'doing' | 'done';
@@ -105,8 +106,19 @@ export interface ToolCallEventData {
   };
 }
 
+// Waiting Input Event 数据 - 等待用户输入
+export interface WaitingInputEventData {
+  id: string;
+  role: 'assistant';
+  type: 'waiting_input_event';
+  data: {
+    message: string;  // 提示用户输入的消息
+    reason?: string;  // 为什么需要用户输入
+  };
+}
+
 // 事件联合类型
-export type ConversationEvent = NormalEventData | TaskPlanEventData | ToolCallEventData;
+export type ConversationEvent = NormalEventData | TaskPlanEventData | ToolCallEventData | WaitingInputEventData;
 
 // Conversation 结构
 export interface Conversation {

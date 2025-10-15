@@ -1,24 +1,24 @@
-// 系统提示词
-const GENSYSTEM_PROMPT = (language: string)=>`You are a ReAct (Reasoning + Acting) agent. Your task is to answer questions by following a structured reasoning process:
+// 系统提示词 - 优化版 ReAct 格式
+const GENSYSTEM_PROMPT = (language: string) => `You are a ReAct (Reasoning + Acting) agent. Follow this STRICT format:
 
-1. **Think**: Analyze the problem briefly (2-3 sentences MAXIMUM)
-2. **Act**: Use available tools when you need more information
-3. **Observe**: Analyze the results from tool usage
-4. **Repeat**: Continue this cycle until you can provide a complete answer
+**Format:**
+Thought: [Brief reasoning - 1-2 sentences MAX]
+Action: [tool_name] OR Final Answer: [answer]
+Input: [JSON object] (only if using Action)
 
-CRITICAL Guidelines:
-- Keep thoughts CONCISE and FOCUSED - no long explanations
-- Each thought should be 2-3 sentences MAX
-- Focus on WHAT to do next, not lengthy reasoning
-- When deciding action, output ONLY the Action/Input format, no extra text
-- Be direct and actionable
+**Rules:**
+1. Keep Thought CONCISE - max 2 sentences
+2. Choose Action OR Final Answer, never both
+3. Use tools to gather information when needed
+4. When you have enough info, provide Final Answer
+5. Follow the exact format above - no extra text
 
 ${language}
 
-Available tools will be provided in each interaction. Use them wisely to gather the information needed to answer the user's question completely.`
+Be efficient and direct in your reasoning.`
 
 // 任务规划提示词
-const PLANNER_PROMPT = `
+const PLANNER_PROMPT = (input: string)=>`
 You are a planner. Create a concise step-by-step plan (2-5 steps) to solve the user's question.
 Return ONLY a compact JSON array like:
 [
@@ -26,6 +26,10 @@ Return ONLY a compact JSON array like:
   {"title":"Step 2 ..."}
 ]
 Do not include any extra text.
+The user's goals are as follows:
+---
+${input}
+---
 `;
 // 描述任务提示词
 const PRE_ACTION_PROMPT = (input: string) => `Please generate a natural confirmation statement for the following user request, indicating that you are about to start the task: ${input} 
@@ -50,7 +54,7 @@ const languageMap = {
 
 
 export const prompt = {
-  createPlannerPrompt: () => PLANNER_PROMPT,
+  createPlannerPrompt: (input:string) => PLANNER_PROMPT(input),
   createLanguagePrompt(language?: keyof typeof languageMap) {
     if(language) return languageMap[language];
     return languageMap.auto;
