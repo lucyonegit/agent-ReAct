@@ -13,10 +13,6 @@ import {
   TaskStep,
   TaskStatus,
   ConversationEvent,
-  NormalEventData,
-  TaskPlanEventData,
-  ToolCallEventData,
-  WaitingInputEventData
 } from '../types/index.js';
 import { prompt } from './config/prompt';
 
@@ -152,11 +148,11 @@ export class ReActAgent {
     });
     
     const eventId = this.genId('plan_update');
-    this.emitTaskPlan(
-      { step: this.planList }, 
-      sessionId, 
-      conversationId, 
-      eventId, 
+    this.emit('task_plan',
+      { step: this.planList },
+      sessionId,
+      conversationId,
+      eventId,
       onStream
     );
     
@@ -199,8 +195,8 @@ export class ReActAgent {
       });
       
       // 发送用户输入事件
-      this.emitNormal({ 
-        content: `💬 用户输入：${input}` 
+      this.emit('normal', {
+        content: `💬 用户输入：${input}`
       }, sessionId, conversationId, this.genId('user_input'), options?.onStream);
       
       // 清除暂停状态
@@ -257,7 +253,6 @@ export class ReActAgent {
 
     for (let iteration = startIteration; iteration < this.config.maxIterations; iteration++) {
       try {
-        // 🔄 优化：合并思考与决策为一次 LLM 调用
         const reactResult = await this.reasonAndAct(context, onStream, conversationId, sessionId);
         
         // 记录思考步骤
@@ -274,8 +269,8 @@ export class ReActAgent {
           }
           
           // 发送最终答案准备事件
-          this.emitNormal({ 
-            content: '**准备答案** - 已收集足够信息，正在生成最终答案...' 
+          this.emit('normal', {
+            content: '**准备答案** - 已收集足够信息，正在生成最终答案...'
           }, sessionId || 'default', conversationId || 'default', `prepare_answer_${iteration}`, onStream);
           
           // 使用流式生成最终答案
@@ -297,7 +292,7 @@ export class ReActAgent {
             });
             
             // 发送等待输入事件
-            this.emitWaitingInput({
+            this.emit('waiting_input', {
               message: reactResult.toolInput?.message || '请输入更多信息以继续...',
               reason: reactResult.toolInput?.reason
             }, sessionId, conversationId, this.genId('waiting'), onStream);
@@ -321,7 +316,7 @@ export class ReActAgent {
           
           console.log('🔧 发送工具调用 START 事件:', { toolEventId, tool: reactResult.toolName });
           
-          this.emitToolCall({
+          this.emit('tool_call', {
             id: toolEventId,
             status: 'start',
             tool_name: reactResult.toolName!,
@@ -354,7 +349,7 @@ export class ReActAgent {
           
           console.log('🔧 发送工具调用 END 事件:', { toolEventId, success: toolResult.success, durationMs: toolFinishedAt - toolStartedAt });
           
-          this.emitToolCall({
+          this.emit('tool_call', {
             id: toolEventId,
             status: 'end',
             tool_name: reactResult.toolName!,
@@ -391,7 +386,7 @@ export class ReActAgent {
             });
             
             // 发送等待输入事件
-            this.emitWaitingInput({
+            this.emit('waiting_input', {
               message: '当前步骤已完成，请输入继续执行或提供新的指令...',
               reason: '人机协作模式 - 每步后等待确认'
             }, sessionId, conversationId, this.genId('waiting'), onStream);
@@ -402,7 +397,7 @@ export class ReActAgent {
         }
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-        this.emitNormal({ content: `❌ 错误：${errorMessage}` }, sessionId, conversationId, `error_${iteration}`, onStream);
+        this.emit('normal', { content: `❌ 错误：${errorMessage}` }, sessionId, conversationId, `error_${iteration}`, onStream);
         throw new Error(`ReAct execution failed: ${errorMessage}`);
       }
     }
@@ -413,7 +408,7 @@ export class ReActAgent {
   }
 
   /**
-   * 生成任务计划（在对话开始时调用）
+   * 生成任务计划（使用 tool call 直接返回结构化 JSON）
    */
   private async generatePlan(
     context: AgentContext,
@@ -422,47 +417,74 @@ export class ReActAgent {
     sessionId?: string
   ): Promise<void> {
     console.log('🎯 开始生成任务计划...');
-    const messages = [
-      new SystemMessage(prompt.createPlannerPrompt(context.input)),
-    ];
-    
+
+    const planToolSchema = {
+      name: 'create_task_plan',
+      description: '创建任务执行计划',
+      parameters: {
+        type: 'object',
+        properties: {
+          tasks: {
+            type: 'array',
+            description: '任务步骤列表',
+            items: {
+              type: 'object',
+              properties: {
+                title: { type: 'string', description: '任务步骤标题' }
+              },
+              required: ['title']
+            }
+          }
+        },
+        required: ['tasks']
+      }
+    };
+
     try {
-      const resp = await this.llm.invoke(messages);
-      const txt = (resp.content as string).trim();
-      let plan: Array<{ title: string }> = [];
-      try {
-        // 尝试提取 JSON 段落
-        const jsonMatch = txt.match(/\[[\s\S]*\]/);
-        const jsonStr = jsonMatch ? jsonMatch[0] : txt;
-        const parsed = JSON.parse(jsonStr);
-        if (Array.isArray(parsed)) {
-          plan = parsed
-            .map((p) => (typeof p === 'string' ? { title: p } : p))
-            .filter((p) => p && typeof p.title === 'string' && p.title.trim().length > 0);
-        }
-      } catch {
-        // 忽略解析错误，走兜底
-      }
-      if (!plan || plan.length === 0) {
-        plan = [
-          { title: '分析问题与制定计划' },
-          { title: '执行必要的工具动作获取信息' },
-          { title: '整理观察并撰写答案' },
-        ];
-      }
-      this.planList = plan.map((p, i) => ({
-        id: `plan_${i + 1}`,
-        title: p.title,
-        status: 'pending' as TaskStatus,
+      // 使用 bindTools 绑定工具
+      const llmWithTools = this.llm.bind({
+        tools: [{ type: 'function', function: planToolSchema }],
+        tool_choice: { type: 'function', function: { name: 'create_task_plan' } }
+      } as any);
+
+      const response = await llmWithTools.invoke([
+        new SystemMessage(prompt.createPlannerPrompt(context.input))
+      ]);
+
+      console.log('🎯 任务计划生成结果:', response.content);
+      this.planList = JSON.parse(response.content as string).map((task: any, i: number) => ({
+          id: `plan_${i + 1}`,
+          title: task.title,
+          status: 'pending' as TaskStatus
       }));
-    } catch {
-      // LLM 调用异常兜底
-      this.planList = [
-        { id: 'plan_1', title: '分析问题与制定计划', status: 'pending' as TaskStatus },
-        { id: 'plan_2', title: '执行必要的工具动作获取信息', status: 'pending' as TaskStatus },
-        { id: 'plan_3', title: '整理观察并撰写答案', status: 'pending' as TaskStatus },
-      ];
+      console.log('✅ 任务计划生成成功:', this.planList.length, '个步骤');
+      return
+
+      // 解析 tool call 结果
+      // const toolCalls = (response as any).additional_kwargs?.tool_calls;
+      // if (toolCalls?.[0]?.function?.arguments) {
+      //   const planData = JSON.parse(toolCalls[0].function.arguments);
+      //   const tasks = planData.tasks || [];
+
+      //   this.planList = tasks.map((task: any, i: number) => ({
+      //     id: `plan_${i + 1}`,
+      //     title: task.title,
+      //     status: 'pending' as TaskStatus
+      //   }));
+
+      //   console.log('✅ 任务计划生成成功:', this.planList.length, '个步骤');
+      //   return;
+      // }
+    } catch (error) {
+      console.warn('⚠️ 任务计划生成失败，使用默认计划:', error);
     }
+
+    // 兜底方案
+    this.planList = [
+      { id: 'plan_1', title: '分析问题与制定计划', status: 'pending' as TaskStatus },
+      { id: 'plan_2', title: '执行必要的工具动作获取信息', status: 'pending' as TaskStatus },
+      { id: 'plan_3', title: '整理观察并撰写答案', status: 'pending' as TaskStatus }
+    ];
   }
   
   private async generatePreActionTip(
@@ -477,9 +499,9 @@ export class ReActAgent {
     let preActionTip = ''
     for await (const chunk of response) {
       preActionTip += chunk.content;
-      this.emitNormal({
+      this.emit('normal', {
         content: chunk.content as string,
-        stream:true
+        stream: true
       }, sessionId, conversationId, preActionEventId, onStream);
     }
     return preActionTip;
@@ -522,16 +544,13 @@ export class ReActAgent {
       new SystemMessage(systemPrompt),
       ...conversationHistory,
       new HumanMessage(`Follow the ReAct format:
-
-Thought: [Brief reasoning about what to do next - 1-2 sentences]
-Action: [tool_name] OR Final Answer: [your answer]
-Input: [tool_input_json] (only if Action is used)
-
-Available tools:
-${toolsDescription}
-
-Remember: Keep Thought CONCISE. Output ONLY the above format.`)
-    ];
+        Thought: [Brief reasoning about what to do next - 1-2 sentences]
+        Action: [tool_name] OR Final Answer: [your answer]
+        Input: [tool_input_json] (only if Action is used)
+        Available tools:
+        ${toolsDescription}
+        Remember: Keep Thought CONCISE. Output ONLY the above format.`)
+      ];
 
     const response = await this.llm.invoke(messages);
     const content = response.content as string;
@@ -541,8 +560,8 @@ Remember: Keep Thought CONCISE. Output ONLY the above format.`)
     
     // 发送思考事件（简洁版）
     if (parsed.thought && onStream) {
-      this.emitNormal({ 
-        content: `💭 ${parsed.thought}` 
+      this.emit('normal', {
+        content: `💭 ${parsed.thought}`
       }, sessionId || 'default', conversationId || 'default', this.genId('thought'), onStream);
     }
 
@@ -550,7 +569,7 @@ Remember: Keep Thought CONCISE. Output ONLY the above format.`)
     if (parsed.type === 'action' && parsed.toolName && onStream) {
       const friendlyMessage = this.formatFriendlyToolMessage(parsed.toolName, parsed.toolInput);
       if (friendlyMessage) {
-        this.emitNormal({ 
+        this.emit('normal', {
           content: friendlyMessage
         }, sessionId || 'default', conversationId || 'default', this.genId('action'), onStream);
       }
@@ -630,7 +649,7 @@ Remember: Keep Thought CONCISE. Output ONLY the above format.`)
   }
 
   /**
-   * 🆕 构建优化的 ReAct 提示词
+   * 构建优化的 ReAct 提示词
    */
   private buildReActPrompt(currentStep?: TaskStep): string {
     const languageInstructions = prompt.createLanguagePrompt();
@@ -694,7 +713,7 @@ Focus on completing this step efficiently.`;
     }
     
     if (onStream) {
-      this.emitNormal({ 
+      this.emit('normal', {
         content: observationContent
       }, sessionId || 'default', conversationId || 'default', observationEventId, onStream);
     }
@@ -750,12 +769,12 @@ Please be concise and direct in your response.`)
         if (content) {
           fullContent += content;
           // 所有流式片段使用相同的 ID
-          this.emitNormal({ content, stream: true }, sessionId || 'default', conversationId || 'default', streamEventId, onStream);
+          this.emit('normal', { content, stream: true }, sessionId || 'default', conversationId || 'default', streamEventId, onStream);
         }
       }
-      
+
       // 流式模式下，发送最终答案完成事件（使用相同的 ID，标记 done）
-      this.emitNormal({ content: '', stream: true, done: true }, sessionId || 'default', conversationId || 'default', streamEventId, onStream);
+      this.emit('normal', { content: '', stream: true, done: true }, sessionId || 'default', conversationId || 'default', streamEventId, onStream);
       return fullContent;
     } else {
       // 非流式模式
@@ -764,9 +783,9 @@ Please be concise and direct in your response.`)
       
       // 发送完整的最终答案
       if (onStream) {
-        this.emitNormal({ content }, sessionId || 'default', conversationId || 'default', `final_full_${Date.now()}`, onStream);
+        this.emit('normal', { content }, sessionId || 'default', conversationId || 'default', `final_full_${Date.now()}`, onStream);
       }
-      
+
       return content;
     }
   }
@@ -806,120 +825,64 @@ Please be concise and direct in your response.`)
   }
 
   /**
-   * 发送底层事件
+   * 发送流式事件（统一入口）
    */
-  private emitStreamEvent(
+  private emit(
+    type: 'normal' | 'task_plan' | 'tool_call' | 'waiting_input',
+    payload: any,
     sessionId: string,
     conversationId: string,
-    event: ConversationEvent,
-    onStream?: (event: StreamEvent) => void
+    eventId: string,
+    onStream?: (e: StreamEvent) => void
   ): void {
-    if (onStream) {
-      const streamEvent: StreamEvent = {
-        sessionId,
-        conversationId,
-        event,
-        timestamp: Date.now()
-      };
-      this.streamManager.emitStreamEvent(streamEvent);
-      onStream(streamEvent);
+    if (!onStream) return;
+
+    let event: ConversationEvent;
+
+    switch (type) {
+      case 'normal':
+        event = {
+          id: eventId,
+          role: 'assistant',
+          type: 'normal_event',
+          ...payload
+        };
+        break;
+      case 'task_plan':
+        event = {
+          id: eventId,
+          role: 'assistant',
+          type: 'task_plan_event',
+          data: payload
+        };
+        break;
+      case 'tool_call':
+        event = {
+          id: eventId,
+          role: 'assistant',
+          type: 'tool_call_event',
+          data: payload
+        };
+        break;
+      case 'waiting_input':
+        event = {
+          id: eventId,
+          role: 'assistant',
+          type: 'waiting_input_event',
+          data: payload
+        };
+        break;
     }
-  }
 
-  /**
-   * 发送普通文本事件
-   */
-  private emitNormal(
-    payload: { content: string; stream?: boolean; done?: boolean },
-    sessionId: string,
-    conversationId: string,
-    eventId: string,
-    onStream?: (e: StreamEvent) => void
-  ): void {
-    const event: NormalEventData = {
-      id: eventId,
-      role: 'assistant',
-      type: 'normal_event',
-      content: payload.content,
-      stream: payload.stream,
-      done: payload.done
+    const streamEvent: StreamEvent = {
+      sessionId,
+      conversationId,
+      event,
+      timestamp: Date.now()
     };
-    this.emitStreamEvent(sessionId, conversationId, event, onStream);
-  }
 
-  /**
-   * 发送任务计划事件
-   */
-  private emitTaskPlan(
-    data: { step: TaskStep[] },
-    sessionId: string,
-    conversationId: string,
-    eventId: string,
-    onStream?: (e: StreamEvent) => void
-  ): void {
-    const event: TaskPlanEventData = {
-      id: eventId,
-      role: 'assistant',
-      type: 'task_plan_event',
-      data
-    };
-    this.emitStreamEvent(sessionId, conversationId, event, onStream);
-  }
-
-  /**
-   * 发送工具调用事件
-   */
-  private emitToolCall(
-    data: {
-      id?: string;
-      status?: 'start' | 'end';
-      tool_name: string;
-      args: any;
-      result?: any;
-      success?: boolean;
-      startedAt?: number;
-      finishedAt?: number;
-      durationMs?: number;
-      iteration?: number;
-    },
-    sessionId: string,
-    conversationId: string,
-    eventId: string,
-    onStream?: (e: StreamEvent) => void
-  ): void {
-    const event: ToolCallEventData = {
-      id: eventId,
-      role: 'assistant',
-      type: 'tool_call_event',
-      data
-    };
-    
-    console.log('📤 emitToolCall 调用:', { eventId, status: data.status, tool: data.tool_name });
-    console.log('📤 完整事件对象:', JSON.stringify(event, null, 2));
-    
-    this.emitStreamEvent(sessionId, conversationId, event, onStream);
-  }
-
-  /**
-   * 发送等待用户输入事件
-   */
-  private emitWaitingInput(
-    data: { message: string; reason?: string },
-    sessionId: string,
-    conversationId: string,
-    eventId: string,
-    onStream?: (e: StreamEvent) => void
-  ): void {
-    const event: WaitingInputEventData = {
-      id: eventId,
-      role: 'assistant',
-      type: 'waiting_input_event',
-      data
-    };
-    
-    console.log('⏸️ 发送等待输入事件:', { eventId, message: data.message });
-    
-    this.emitStreamEvent(sessionId, conversationId, event, onStream);
+    this.streamManager.emitStreamEvent(streamEvent);
+    onStream(streamEvent);
   }
 
   /**

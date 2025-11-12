@@ -19,7 +19,7 @@ export { ExampleTools } from './tools/collection/index.js';
 
 // 便捷创建函数
 import { ReActAgent } from './core/ReActAgent.js';
-import { StreamManager, createConsoleStreamHandler } from './core/stream/StreamManager.js';
+import { StreamManager } from './core/stream/StreamManager.js';
 import { ExampleTools } from './tools/collection/index.js';
 import { AgentConfig } from './types/index.js';
 

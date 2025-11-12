@@ -1,3 +1,4 @@
+
 // 系统提示词 - 优化版 ReAct 格式
 const GENSYSTEM_PROMPT = (language: string) => `You are a ReAct (Reasoning + Acting) agent. Follow this STRICT format:
 
@@ -31,6 +32,16 @@ The user's goals are as follows:
 ${input}
 ---
 `;
+
+// 任务规划提示词
+const PLANNER_PROMPT_WITH_TOOL = (input: string)=>`
+You are a planner. Create a concise step-by-step plan (2-5 steps) to solve the user's question. you can use some tools to gather information.
+The user's goals are as follows:
+---
+${input}
+---
+`;
+
 // 描述任务提示词
 const PRE_ACTION_PROMPT = (input: string) => `Please generate a natural confirmation statement for the following user request, indicating that you are about to start the task: ${input} 
 ask for Brief, natural and polite
@@ -65,5 +76,6 @@ export const prompt = {
   },
   createPreActionPrompt(input:string) {
     return PRE_ACTION_PROMPT('');
-  }
+  },
+  createPlannerPromptWithTool: (input:string) => PLANNER_PROMPT_WITH_TOOL(input)
 }

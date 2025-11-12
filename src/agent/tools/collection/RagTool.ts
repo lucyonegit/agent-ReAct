@@ -25,7 +25,7 @@ interface ErrorResponse {
  */
 export const RagQueryTool: ToolDefinition = {
   name: 'rag_query',
-  description: '这是一份考勤制度的文档，执行RAG检索增强生成查询，从向量数据库中搜索相关文档并生成回答',
+  description: '执行RAG检索增强生成查询',
   parameters: [
     {
       name: 'query',
@@ -53,7 +53,7 @@ export const RagQueryTool: ToolDefinition = {
       };
 
       // 调用RAG查询接口
-      const response = await fetch('http://192.168.20.132:3000/query', {
+      const response = await fetch('http://192.168.21.101:3000/query', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
