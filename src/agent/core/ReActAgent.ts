@@ -551,17 +551,13 @@ export class ReActAgent {
       this.planList.find((p) => p.status === 'doing') ||
       this.planList.find((p) => p.status === 'pending');
 
-    const systemPrompt = this.buildReActPrompt(currentStep);
-    const conversationHistory = this.buildConversationHistory(context);
     const toolsDescription = this.toolRegistry.getToolsDescription();
-
+    const systemPrompt = this.buildReActPrompt(currentStep,toolsDescription);
+    const conversationHistory = this.buildConversationHistory(context);
+    
     const messages = [
       new SystemMessage(systemPrompt),
       ...conversationHistory,
-      new HumanMessage(`
-        Available tools:
-        ${toolsDescription}
-        Remember: Keep Thought CONCISE. Output ONLY the above format.`)
       ];
 
     const response = await this.llm.invoke(messages);
@@ -674,9 +670,9 @@ export class ReActAgent {
   /**
    * 构建优化的 ReAct 提示词
    */
-  private buildReActPrompt(currentStep?: TaskStep): string {
-    const languageInstructions = prompt.createLanguagePrompt();
-    const basePrompt = prompt.createSystemPrompt(languageInstructions);
+  private buildReActPrompt(currentStep?: TaskStep,toolsDescription?: string): string {
+    const languageInstructions = prompt.createLanguagePrompt(this.config.language);
+    const basePrompt = prompt.createSystemPrompt(languageInstructions, toolsDescription);
     
     if (currentStep) {
       return `${basePrompt}
@@ -768,7 +764,7 @@ Focus on completing this step efficiently.`;
     conversationId?: string,
     sessionId?: string
   ): Promise<string> {
-    const languageInstructions = prompt.createLanguagePrompt();
+    const languageInstructions = prompt.createLanguagePrompt(this.config.language);
     const systemPrompt = prompt.createSystemPrompt(languageInstructions);
     const conversationHistory = this.buildConversationHistory(context);
     
@@ -830,9 +826,8 @@ Please be concise and direct in your response.`)
       } else if (step.type === 'action') {
         messages.push(new AIMessage(`Action: ${step.toolName || 'unknown'}\nInput: ${JSON.stringify(step.toolInput)}`));
       } else if (step.type === 'observation') {
-        // 简化观察结果，避免过长
         const observationContent = this.truncateObservation(step.content);
-        messages.push(new AIMessage(`Observation: ${observationContent}`));
+        messages.push(new HumanMessage(`Observation: ${observationContent}`));
       }
     }
 

@@ -1,6 +1,6 @@
 
 // 系统提示词 - 优化版 ReAct 格式
-const GENSYSTEM_PROMPT = (language: string) => `You are a ReAct (Reasoning + Acting) agent. Follow this STRICT format:
+const GENSYSTEM_PROMPT = (language: string, toolsDescription?: string) => `You are a ReAct (Reasoning + Acting) agent. Follow this STRICT format:
 
 **Format:**
 Thought: [Brief reasoning - 1-2 sentences MAX]
@@ -15,6 +15,10 @@ Input: [JSON object] (only if using Action)
 5. Follow the exact format above - no extra text
 
 ${language}
+
+${toolsDescription ? toolsDescription : ''}
+
+Use the following English section labels EXACTLY as written: "Thought", "Action", "Input", "Final Answer".
 
 Be efficient and direct in your reasoning.`
 
@@ -48,19 +52,18 @@ ask for Brief, natural and polite
 `
 
 const languageMap = {
-  chinese: `Language Requirement: 
-- MUST respond in Chinese (中文)
-- All thoughts, actions, and final answers should be in Chinese
-- Use Chinese for all reasoning and explanations`,
+  chinese: `Language Requirement:
+  - Write all content in Chinese (中文)
+  - Keep the section labels in English EXACTLY: Thought / Action / Input / Final Answer
+  - Use Chinese for all reasoning, tool inputs (values), and the final answer`,
   english: `Language Requirement:
-- MUST respond in English only
-- All thoughts, actions, and final answers should be in English
-- Use English for all reasoning and explanations`,
+  - Write all content in English
+  - Keep the section labels in English EXACTLY: Thought / Action / Input / Final Answer
+  - Use English for all reasoning, tool inputs (values), and the final answer`,
   auto: `Language Requirement:
-- Respond in the same language as the user's question
-- If the user asks in Chinese, respond in Chinese
-- If the user asks in English, respond in English
-- Maintain language consistency throughout the conversation`
+  - Respond in the same language as the user's question (Chinese or English)
+  - Keep the section labels in English EXACTLY: Thought / Action / Input / Final Answer
+  - Maintain language consistency for content throughout the conversation`
 }
 
 
@@ -70,12 +73,15 @@ export const prompt = {
     if(language) return languageMap[language];
     return languageMap.auto;
   },
-  createSystemPrompt(languagePrompt?: string) {
-    if(languagePrompt) return GENSYSTEM_PROMPT(languagePrompt);
-    return GENSYSTEM_PROMPT(languageMap.auto);
+  createSystemPrompt(languagePrompt?: string, toolsDescription?: string) {
+    const base = languagePrompt ? GENSYSTEM_PROMPT(languagePrompt) : GENSYSTEM_PROMPT(languageMap.auto);
+    if (toolsDescription && toolsDescription.trim()) {
+      return `${base}\n\nAvailable tools:\n${toolsDescription}\nUse tools when needed. If using a tool, output Action and Input.`;
+    }
+    return base;
   },
   createPreActionPrompt(input:string) {
-    return PRE_ACTION_PROMPT('');
+    return PRE_ACTION_PROMPT(input);
   },
   createPlannerPromptWithTool: (input:string) => PLANNER_PROMPT_WITH_TOOL(input)
 }
