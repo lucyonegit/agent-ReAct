@@ -254,6 +254,10 @@ export class ReActAgent {
     for (let iteration = startIteration; iteration < this.config.maxIterations; iteration++) {
       try {
         const reactResult = await this.reasonAndAct(context, onStream, conversationId, sessionId);
+
+      this.emit('normal', {
+            content: `这是第${iteration}次迭代，${reactResult.thought} ${reactResult.type}`
+          }, sessionId || 'default', conversationId || 'default', `prepare_answer_${iteration}`, onStream);
         
         // 记录思考步骤
         context.steps.push({
@@ -617,24 +621,35 @@ export class ReActAgent {
       const inputMatch = content.match(/Input:\s*(.+)/s);
       
       if (actionMatch) {
-        const toolName = actionMatch[1].trim();
+        const rawToolName = actionMatch[1].trim();
+        const toolName = rawToolName;
         let toolInput: any = {};
-        
+        let rawInputStr: string | null = null;
+
         if (inputMatch) {
+          rawInputStr = inputMatch[1].trim();
           try {
-            const inputStr = inputMatch[1].trim();
-            // 更严格的 JSON 提取
-            const jsonMatch = inputStr.match(/\{[\s\S]*\}/);
+            const jsonMatch = rawInputStr.match(/\{[\s\S]*\}/);
             if (jsonMatch) {
               toolInput = JSON.parse(jsonMatch[0]);
             } else {
-              // 尝试直接解析
-              toolInput = JSON.parse(inputStr);
+              toolInput = JSON.parse(rawInputStr);
             }
           } catch (e) {
-            console.warn('⚠️ JSON 解析失败，使用原始字符串:', inputMatch[1]);
-            toolInput = { input: inputMatch[1].trim() };
+            toolInput = { input: rawInputStr };
           }
+        }
+
+        // 兼容模型错误：将 Final Answer 当作 Action 名称
+        if (/^final\s*answer$/i.test(toolName)) {
+          const answerText = typeof toolInput === 'string'
+            ? toolInput
+            : (toolInput?.input ?? rawInputStr ?? '');
+          return {
+            type: 'final_answer',
+            thought,
+            content: (answerText || '').toString().trim()
+          };
         }
 
         return {
@@ -917,4 +932,3 @@ Please be concise and direct in your response.`)
     this.llm = this.createLLM();
   }
 }
-
