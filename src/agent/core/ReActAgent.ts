@@ -262,10 +262,21 @@ export class ReActAgent {
         });
 
         if (reactResult.type === 'final_answer') {
-          // 标记当前步骤为完成
-          const hasChange = this.markCurrentStepDone('✅ 已完成');
-          if (hasChange) {
-            this.emitPlanUpdate(sessionId || 'default', conversationId || 'default', onStream);
+          // 优先完成当前进行中的步骤
+          let changed = this.markCurrentStepDone('✅ 已完成');
+          
+          // 如仍存在未完成的计划（例如“撰写最终报告”），确保在最终答案生成前将其标记为完成
+          const hasPending = this.planList.some(p => p.status === 'pending');
+          if (hasPending) {
+            // 将下一项置为进行中后立即标记完成
+            const advanced = this.markNextPendingDoing('📝 正在生成最终答案');
+            const doneNow = this.markCurrentStepDone('✅ 已生成最终答案');
+            changed = changed || advanced || doneNow;
+          }
+
+          if (changed) {
+            // 强制推送一次计划更新，避免快照去重导致 UI 未刷新
+            this.emitPlanUpdate(sessionId || 'default', conversationId || 'default', onStream, true);
           }
           
           // 发送最终答案准备事件
@@ -543,10 +554,7 @@ export class ReActAgent {
     const messages = [
       new SystemMessage(systemPrompt),
       ...conversationHistory,
-      new HumanMessage(`Follow the ReAct format:
-        Thought: [Brief reasoning about what to do next - 1-2 sentences]
-        Action: [tool_name] OR Final Answer: [your answer]
-        Input: [tool_input_json] (only if Action is used)
+      new HumanMessage(`
         Available tools:
         ${toolsDescription}
         Remember: Keep Thought CONCISE. Output ONLY the above format.`)
