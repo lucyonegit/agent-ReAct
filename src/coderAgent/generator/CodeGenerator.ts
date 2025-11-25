@@ -29,6 +29,7 @@ export class CodeGenerator {
         onRagUsed?: (data: { term: string; components: string[] }) => void;
         onRagSources?: (sources: Array<{ content: string; metadata: Record<string, any> }>) => void;
         onRagDoc?: (payload: { component: string; section: 'API / Props' | 'Usage Example'; content: string }) => void;
+        onScenarioMatches?: (matches: Array<{ scenarioId: string; paths: string[] }>) => void;
     }): Promise<Project> {
         options?.onThought?.('Thought: 启动代码生成流程');
         options?.onThought?.('Thought: 从BDD场景中提取潜在组件关键词用于检索');
@@ -90,7 +91,12 @@ export class CodeGenerator {
                 jsonStr = content.replace(/^\s*```(?:json)?\s*/, '').replace(/\s*```\s*$/, '');
             }
 
-            return JSON.parse(jsonStr) as Project;
+            const project = JSON.parse(jsonStr) as Project;
+            try {
+                const matches = await this.computeScenarioMatches(bddScenarios, project.files.map(f => f.path));
+                options?.onScenarioMatches?.(matches);
+            } catch {}
+            return project;
         } catch (error) {
             console.warn('Failed to parse project JSON:', error);
             // Fallback
@@ -207,5 +213,18 @@ export class CodeGenerator {
 
     public getRagSources(): Array<{ content: string; metadata: Record<string, any> }> {
         return this.ragSources;
+    }
+
+    private async computeScenarioMatches(bddScenarios: string, filePaths: string[]): Promise<Array<{ scenarioId: string; paths: string[] }>> {
+        const prompt = `Given BDD scenarios and a list of project file paths, select up to 3 most relevant file paths for each scenario and return JSON array [{"scenarioId":"...","paths":["..."]}].\nScenarios JSON:\n${bddScenarios}\n\nFile paths:\n${filePaths.join('\n')}`;
+        const response = await this.llm.invoke([new HumanMessage(prompt)]);
+        const content = response.content as string;
+        try {
+            const jsonMatch = content.match(/```json\n([\s\S]*?)\n```/) || content.match(/```\n([\s\S]*?)\n```/);
+            const jsonStr = jsonMatch ? jsonMatch[1] : content;
+            const arr = JSON.parse(jsonStr);
+            if (Array.isArray(arr)) return arr.map((x: any) => ({ scenarioId: String(x.scenarioId || x.id || ''), paths: Array.isArray(x.paths) ? x.paths.map((p: any) => String(p)) : [] }));
+        } catch {}
+        return [];
     }
 }

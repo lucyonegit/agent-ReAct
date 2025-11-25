@@ -181,6 +181,11 @@ export class CodingAgent {
                         if (onStream) {
                             onStream({ sessionId: options?.sessionId || 'default', conversationId: options?.conversationId || 'default', event: { id: this.genId('rag_doc'), role: 'assistant', type: 'rag_doc_event', data: payload }, timestamp: Date.now() });
                         }
+                    },
+                    onScenarioMatches: (matches) => {
+                        if (onStream && matches && matches.length > 0) {
+                            onStream({ sessionId: options?.sessionId || 'default', conversationId: options?.conversationId || 'default', event: { id: this.genId('scenario_match'), role: 'assistant', type: 'scenario_match_event', data: { matches } }, timestamp: Date.now() });
+                        }
                     }
                 });
                 finalProject = project;
