@@ -1,69 +1,59 @@
 
-// 系统提示词 - 优化版 ReAct 格式
-const GENSYSTEM_PROMPT = (language: string, toolsDescription?: string) => `You are a ReAct (Reasoning + Acting) agent. Follow this STRICT format:
+const GENSYSTEM_PROMPT = (language: string, toolsDescription?: string) => `你是一个基于 ReAct（推理 + 执行动作）架构的智能体。严格遵守以下输出格式：
 
-**Format:**
-Thought: [Brief reasoning - 1-2 sentences MAX]
-Action: [tool_name] OR Final Answer: [answer]
-Input: [JSON object] (only if using Action)
+格式：
+Thought: [简短推理，最多 1-2 句]
+Action: [tool_name] 或 Final Answer: [answer]
+Input: [JSON 对象，仅当执行 Action 时填写]
 
-**Rules:**
-1. Keep Thought CONCISE - max 2 sentences
-2. Choose Action OR Final Answer, never both
-3. Use tools to gather information when needed
-4. When you have enough info, provide Final Answer
-5. Follow the exact format above - no extra text
+规则：
+1. Thought 必须简洁
+2. 只能二选一：Action 或 Final Answer
+3. 需要信息时使用工具；完成当前计划步骤后再继续下一步
+4. 在所有计划步骤完成后再输出 Final Answer
+5. 严格按照上述格式输出，不要添加多余文本
 
 ${language}
 
 ${toolsDescription ? toolsDescription : ''}
 
-Use the following English section labels EXACTLY as written: "Thought", "Action", "Input", "Final Answer".
+注意：区块标签必须使用以下英文单词并保持一致："Thought", "Action", "Input", "Final Answer"。`
 
-Be efficient and direct in your reasoning.`
-
-// 任务规划提示词
 const PLANNER_PROMPT = (input: string)=>`
-You are a planner. Create a concise step-by-step plan (2-5 steps) to solve the user's question.
-Return ONLY a compact JSON array like:
+你是规划器。请为下面的需求创建一个精炼的执行计划（2-5 步）。
+只返回一个紧凑的 JSON 数组，如：
 [
-  {"title":"Step 1 ..."},
-  {"title":"Step 2 ..."}
+  {"title":"步骤 1 ..."},
+  {"title":"步骤 2 ..."}
 ]
-Do not include any extra text.
-The user's goals are as follows:
+不要包含任何额外文本。
+用户目标如下：
 ---
 ${input}
 ---
 `;
 
-// 任务规划提示词
 const PLANNER_PROMPT_WITH_TOOL = (input: string)=>`
-You are a planner. Create a concise step-by-step plan (2-5 steps) to solve the user's question. you can use some tools to gather information.
-The user's goals are as follows:
+你是规划器。请为下面的需求创建一个精炼的执行计划（2-5 步），在必要时可以使用工具获取信息。
+用户目标如下：
 ---
 ${input}
 ---
 `;
 
-// 描述任务提示词
-const PRE_ACTION_PROMPT = (input: string) => `Please generate a natural confirmation statement for the following user request, indicating that you are about to start the task: ${input} 
-ask for Brief, natural and polite
-`
+const PRE_ACTION_PROMPT = (input: string) => `请针对以下用户请求生成一段自然的确认语，说明你将开始执行任务：${input}
+要求：简短、自然、礼貌。`
 
 const languageMap = {
-  chinese: `Language Requirement:
-  - Write all content in Chinese (中文)
-  - Keep the section labels in English EXACTLY: Thought / Action / Input / Final Answer
-  - Use Chinese for all reasoning, tool inputs (values), and the final answer`,
-  english: `Language Requirement:
-  - Write all content in English
-  - Keep the section labels in English EXACTLY: Thought / Action / Input / Final Answer
-  - Use English for all reasoning, tool inputs (values), and the final answer`,
-  auto: `Language Requirement:
-  - Respond in the same language as the user's question (Chinese or English)
-  - Keep the section labels in English EXACTLY: Thought / Action / Input / Final Answer
-  - Maintain language consistency for content throughout the conversation`
+  chinese: `语言要求：
+  - 所有内容均使用中文
+  - 区块标签必须使用英文并保持一致：Thought / Action / Input / Final Answer`,
+  english: `语言要求：
+  - 所有内容均使用中文
+  - 区块标签必须使用英文并保持一致：Thought / Action / Input / Final Answer`,
+  auto: `语言要求：
+  - 所有内容均使用中文
+  - 区块标签必须使用英文并保持一致：Thought / Action / Input / Final Answer`
 }
 
 

@@ -219,8 +219,9 @@ export class ReActAgent {
       // 生成预处理提示
       await this.generatePreActionTip(input, conversationId, sessionId, options?.onStream);
       
-      // 🎯 在对话开始时生成任务计划
-      await this.generatePlan(context, options?.onStream, conversationId, sessionId);
+      if (this.config.autoPlanOnStart) {
+        await this.generatePlan(context, options?.onStream, conversationId, sessionId);
+      }
     }
     
     // 进入推理循环
@@ -253,11 +254,7 @@ export class ReActAgent {
 
     for (let iteration = startIteration; iteration < this.config.maxIterations; iteration++) {
       try {
-        const reactResult = await this.reasonAndAct(context, onStream, conversationId, sessionId);
-
-      this.emit('normal', {
-            content: `这是第${iteration}次迭代，${reactResult.thought} ${reactResult.type}`
-          }, sessionId || 'default', conversationId || 'default', `prepare_answer_${iteration}`, onStream);
+        const reactResult = await this.reasonAndAct(context, onStream, conversationId, sessionId, iteration + 1);
         
         // 记录思考步骤
         context.steps.push({
@@ -269,10 +266,9 @@ export class ReActAgent {
           // 优先完成当前进行中的步骤
           let changed = this.markCurrentStepDone('✅ 已完成');
           
-          // 如仍存在未完成的计划（例如“撰写最终报告”），确保在最终答案生成前将其标记为完成
+          // 如仍存在未完成的计划（例如“撰写最终报告”），仅在需要时推进到“生成最终答案”步骤
           const hasPending = this.planList.some(p => p.status === 'pending');
           if (hasPending) {
-            // 将下一项置为进行中后立即标记完成
             const advanced = this.markNextPendingDoing('📝 正在生成最终答案');
             const doneNow = this.markCurrentStepDone('✅ 已生成最终答案');
             changed = changed || advanced || doneNow;
@@ -382,9 +378,38 @@ export class ReActAgent {
           
           // 5️⃣ 标记当前步骤完成，推进到下一步
           if (toolResult.success) {
-            const hasChange = this.markCurrentStepDone(`✅ 已使用 ${reactResult.toolName}`);
+            let hasChange = this.markCurrentStepDone(`✅ 已使用 ${reactResult.toolName}`);
+            // 通用规划结果接入：任何工具若返回 tasks 或 plan.steps，则更新计划
+            const tasks = (toolResult.result?.tasks as any[]) || (toolResult.result?.plan?.steps as any[]);
+            if (Array.isArray(tasks) && tasks.length > 0) {
+              try {
+                const steps = tasks.map((s: any, i: number) => ({ id: s.id || `plan_${i+1}`, title: s.title, status: 'pending' as TaskStatus, note: s.description }));
+                this.planList = steps;
+                hasChange = true;
+              } catch {}
+            }
+            // 通用计划更新协议：工具可返回 planUpdate 指示计划状态更新
+            const planUpdate = toolResult.result?.planUpdate;
+            if (planUpdate) {
+              const before = JSON.stringify(this.planList);
+              const completeIds: string[] = planUpdate.completeIds || [];
+              const completeTitles: string[] = planUpdate.completeTitles || [];
+              const completeAll: boolean = !!planUpdate.completeAll;
+              if (completeIds.length) {
+                this.planList = this.planList.map(p => completeIds.includes(p.id) ? { ...p, status: 'done', note: p.note } : p);
+              }
+              if (completeTitles.length) {
+                this.planList = this.planList.map(p => (
+                  completeTitles.some(t => new RegExp(t, 'i').test(p.title)) ? { ...p, status: 'done', note: p.note } : p
+                ));
+              }
+              if (completeAll) {
+                this.planList = this.planList.map(p => ({ ...p, status: 'done' as TaskStatus }));
+              }
+              hasChange = hasChange || before !== JSON.stringify(this.planList);
+            }
             if (hasChange) {
-              this.emitPlanUpdate(sessionId || 'default', conversationId || 'default', onStream);
+              this.emitPlanUpdate(sessionId || 'default', conversationId || 'default', onStream, true);
             }
           }
           
@@ -420,6 +445,15 @@ export class ReActAgent {
     // 如果达到最大迭代次数，生成最终答案
     const finalAnswer = await this.generateFinalAnswer(context, onStream, conversationId, sessionId);
     return { finalAnswer, isPaused: false };
+  }
+
+  /**
+   * 将所有剩余的 pending 步骤标记为 done
+   */
+  private markAllPendingDone(note?: string): void {
+    this.planList = this.planList.map(p => (
+      p.status === 'pending' ? { ...p, status: 'done', note: note || p.note } : p
+    ));
   }
 
   /**
@@ -530,7 +564,8 @@ export class ReActAgent {
     context: AgentContext,
     onStream?: (event: StreamEvent) => void,
     conversationId?: string,
-    sessionId?: string
+    sessionId?: string,
+    iteration?: number
   ): Promise<{
     type: 'action' | 'final_answer';
     thought: string;
@@ -565,20 +600,35 @@ export class ReActAgent {
 
     // 解析 ReAct 格式输出
     const parsed = this.parseReActOutput(content);
+
+    // 若仍有未完成步骤且返回 Final Answer，在严格模式下改写为继续思考
+    const hasIncompleteSteps = this.planList.some(p => p.status !== 'done');
+    if (this.config.strictActionUntilDone && hasIncompleteSteps && parsed.type === 'final_answer') {
+      const pendingTitles = this.planList.filter(p => p.status !== 'done').map(p => p.title);
+      if (onStream) {
+        this.emit('normal', { content: `⚠️ 检测到存在未完成的计划步骤，已阻止提前输出最终答案。待完成步骤：${pendingTitles.join('，')}` }, sessionId || 'default', conversationId || 'default', this.genId('block_final'), onStream);
+      }
+      return {
+        type: 'action',
+        thought: parsed.thought,
+        toolName: 'continue_thinking',
+        toolInput: { reason: 'incomplete_plan', pending: pendingTitles }
+      };
+    }
     
     // 发送思考事件（简洁版）
     if (parsed.thought && onStream) {
       this.emit('normal', {
-        content: `💭 ${parsed.thought}`
+        content: `💭[thought] 第${iteration || 1}次迭代 ${parsed.thought}`
       }, sessionId || 'default', conversationId || 'default', this.genId('thought'), onStream);
     }
 
-    // 如果是工具调用，发送友好提示
+    // 如果是工具调用，发送一段友好提示
     if (parsed.type === 'action' && parsed.toolName && onStream) {
       const friendlyMessage = this.formatFriendlyToolMessage(parsed.toolName, parsed.toolInput);
       if (friendlyMessage) {
         this.emit('normal', {
-          content: friendlyMessage
+          content: `[toolcall：${parsed.toolName}] ｜ ` + friendlyMessage
         }, sessionId || 'default', conversationId || 'default', this.genId('action'), onStream);
       }
     }
@@ -675,10 +725,15 @@ export class ReActAgent {
     const basePrompt = prompt.createSystemPrompt(languageInstructions, toolsDescription);
     
     if (currentStep) {
+      const remaining = this.planList.filter(p => p.status !== 'done').map(p => `- ${p.title}`).join('\n') || '- 无';
       return `${basePrompt}
 
-**Current Task Step**: ${currentStep.title}
-Focus on completing this step efficiently.`;
+**当前任务步骤**: ${currentStep.title}
+请专注完成当前步骤，并优先使用工具执行所需操作。
+在所有计划步骤完成之前，请勿输出 Final Answer；完成当前步骤后再推进到下一步。
+
+剩余步骤:
+${remaining}`;
     }
     
     return basePrompt;
@@ -698,6 +753,9 @@ Focus on completing this step efficiently.`;
       'calculate': (input) => `🧮 正在计算：${input.expression || ''}...`,
       'rag_search': (input) => `📚 正在知识库中查找相关信息...`,
       'wait_for_user_input': (input) => '', // 这个工具不需要额外提示
+      'create_coding_plan': (input) => `✍️ 正在分析需求并输出高层实现计划...`,
+      'get_component_list': (input) => `🔍 正在获取可用组件列表...`,
+      'search_component_docs': (input) => `🔍 正在获取组件文档...`,
     };
 
     // 如果有定制的友好消息，使用它
@@ -725,8 +783,14 @@ Focus on completing this step efficiently.`;
     let observationContent = '';
     if (toolResult.success) {
       // 简洁展示成功结果
-      const resultPreview = this.formatResultPreview(toolResult.result);
-      observationContent = `✅ 工具执行成功\n结果: ${resultPreview}`;
+      if (toolName === 'generate_code_project' && toolResult.result?.project) {
+        const filesCount = Array.isArray(toolResult.result.project.files) ? toolResult.result.project.files.length : 0;
+        const summary = toolResult.result.project.summary || '';
+        observationContent = `✅ 代码生成完成\n文件数: ${filesCount}\n摘要: ${summary || '(无)'}\n已完成当前“代码生成”阶段，准备推进后续步骤（若有）。`;
+      } else {
+        const resultPreview = this.formatResultPreview(toolResult.result);
+        observationContent = `✅ 工具执行成功\n结果: ${resultPreview}`;
+      }
     } else {
       observationContent = `❌ 工具执行失败\n错误: ${toolResult.error}`;
     }
@@ -816,6 +880,11 @@ Please be concise and direct in your response.`)
     const messages: (HumanMessage | AIMessage)[] = [
       new HumanMessage(`User Question: ${context.input}`)
     ];
+
+    const planSummary = this.planList.map((p, i) => `${i + 1}. ${p.title} [${p.status}]`).join('\n');
+    if (planSummary) {
+      messages.push(new AIMessage(`Plan Status:\n${planSummary}`));
+    }
 
     // 只保留最近的 ReAct 步骤（避免上下文过长）
     const recentSteps = context.steps.slice(-6); // 保留最近6步

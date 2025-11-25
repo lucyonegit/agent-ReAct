@@ -84,7 +84,7 @@ app.get('/api/agent/stream', async (req: Request, res: Response) => {
   req.on('close', () => {
     try {
       res.end();
-    } catch {}
+    } catch { }
   });
 
   // 将 Agent 的流式事件转发为 SSE
@@ -96,10 +96,10 @@ app.get('/api/agent/stream', async (req: Request, res: Response) => {
   try {
     // 使用 runWithSession 支持多轮对话和暂停/恢复
     const result = await agent.runWithSession(prompt, { sessionId, conversationId, onStream });
-    
+
     // 发送结束信号，带上 sessionId、conversationId 和 isPaused 状态
-    sendSSE(res, 'done', { 
-      ok: true, 
+    sendSSE(res, 'done', {
+      ok: true,
       sessionId: result.sessionId,
       conversationId: result.conversationId,
       isPaused: result.isPaused,  // 告诉前端是否处于暂停状态
@@ -108,6 +108,74 @@ app.get('/api/agent/stream', async (req: Request, res: Response) => {
     res.end();
   } catch (err: any) {
     // 发送错误事件
+    const errorEvent: StreamEvent = {
+      sessionId: sessionId || 'error',
+      conversationId: 'error',
+      event: {
+        id: `error_${Date.now()}`,
+        role: 'assistant',
+        type: 'normal_event',
+        content: err?.message || 'unknown error'
+      },
+      timestamp: Date.now()
+    };
+    sendSSE(res, 'stream_event', errorEvent);
+    sendSSE(res, 'done', { ok: false });
+    res.end();
+  }
+});
+
+/**
+ * Coding Agent SSE endpoint
+ * GET /api/coding-agent/stream?prompt=...&model=...
+ */
+import { CodingAgent } from '../coderAgent/index.js';
+
+app.get('/api/coding-agent/stream', async (req: Request, res: Response) => {
+  const prompt = (req.query.prompt as string) || '';
+  const model = (req.query.model as string) || 'qwen-plus';
+  const temperature = req.query.temperature !== undefined ? Number(req.query.temperature) : 0;
+  const sessionId = (req.query.sessionId as string) || undefined;
+  const conversationId = (req.query.conversationId as string) || undefined;
+
+  if (!prompt) {
+    res.status(400).json({ error: 'prompt is required' });
+    return;
+  }
+
+  initSSE(res);
+
+  const agent = new CodingAgent({
+    model,
+    temperature,
+    streamOutput: true,
+    language: 'chinese', // Default to Chinese for now
+    maxTokens: 4000,
+    maxIterations: 10,
+    pauseAfterEachStep: false,
+    autoPlanOnStart: false,
+    strictActionUntilDone: true
+  });
+
+  req.on('close', () => {
+    try {
+      res.end();
+    } catch { }
+  });
+
+  const onStream = (event: StreamEvent) => {
+    sendSSE(res, 'stream_event', event);
+  };
+
+  try {
+    const result = await agent.run(prompt, { sessionId, conversationId, onStream });
+
+    sendSSE(res, 'done', {
+      ok: true,
+      result: result.finalAnswer
+    });
+    res.end();
+  } catch (err: any) {
     const errorEvent: StreamEvent = {
       sessionId: sessionId || 'error',
       conversationId: 'error',

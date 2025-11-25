@@ -42,6 +42,8 @@ export const AgentConfigSchema = z.object({
   streamOutput: z.boolean().default(true),
   language: z.enum(['auto', 'chinese', 'english']).default('auto'),
   pauseAfterEachStep: z.boolean().default(false), // 每步后暂停等待用户确认
+  autoPlanOnStart: z.boolean().default(true),
+  strictActionUntilDone: z.boolean().default(true)
 });
 
 // 导出类型
@@ -54,7 +56,7 @@ export type AgentConfig = z.infer<typeof AgentConfigSchema>;
 // ============= 新的对话结构类型定义 =============
 
 // 事件类型
-export type EventType = 'normal_event' | 'task_plan_event' | 'tool_call_event' | 'waiting_input_event';
+export type EventType = 'normal_event' | 'task_plan_event' | 'tool_call_event' | 'waiting_input_event' | 'bdd_event';
 
 // 任务状态
 export type TaskStatus = 'pending' | 'doing' | 'done';
@@ -117,8 +119,18 @@ export interface WaitingInputEventData {
   };
 }
 
+// BDD Event 数据
+export interface BDDEventData {
+  id: string;
+  role: 'assistant';
+  type: 'bdd_event';
+  data: {
+    scenarios: any;
+  };
+}
+
 // 事件联合类型
-export type ConversationEvent = NormalEventData | TaskPlanEventData | ToolCallEventData | WaitingInputEventData;
+export type ConversationEvent = NormalEventData | TaskPlanEventData | ToolCallEventData | WaitingInputEventData | BDDEventData;
 
 // Conversation 结构
 export interface Conversation {
