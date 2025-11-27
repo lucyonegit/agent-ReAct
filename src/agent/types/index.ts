@@ -43,6 +43,7 @@ export const AgentConfigSchema = z.object({
   language: z.enum(['auto', 'chinese', 'english']).default('auto'),
   pauseAfterEachStep: z.boolean().default(false), // 每步后暂停等待用户确认
   autoPlanOnStart: z.boolean().default(true),
+  autoGenerateFinalAnswer: z.boolean().default(true),
   strictActionUntilDone: z.boolean().default(true)
 });
 
@@ -56,7 +57,7 @@ export type AgentConfig = z.infer<typeof AgentConfigSchema>;
 // ============= 新的对话结构类型定义 =============
 
 // 事件类型
-export type EventType = 'normal_event' | 'task_plan_event' | 'tool_call_event' | 'waiting_input_event' | 'bdd_event';
+export type EventType = 'normal_event' | 'task_plan_event' | 'tool_call_event' | 'waiting_input_event' | 'bdd_event' | 'rag_event' | 'rag_used_event' | 'rag_doc_event' | 'scenario_match_event' | 'architect_event' | 'architecture_event';
 
 // 任务状态
 export type TaskStatus = 'pending' | 'doing' | 'done';
@@ -125,12 +126,57 @@ export interface BDDEventData {
   role: 'assistant';
   type: 'bdd_event';
   data: {
-    scenarios: any;
+    features?: any;
+    scenarios?: any;
   };
 }
 
+export interface RagEventData {
+  id: string;
+  role: 'assistant';
+  type: 'rag_event';
+  data: {
+    sources: Array<{ content: string; metadata: Record<string, any> }>;
+  };
+}
+
+export interface RagUsedEventData {
+  id: string;
+  role: 'assistant';
+  type: 'rag_used_event';
+  data: { term: string; components: string[] };
+}
+
+export interface RagDocEventData {
+  id: string;
+  role: 'assistant';
+  type: 'rag_doc_event';
+  data: { component: string; section: string; content: string };
+}
+
+export interface ScenarioMatchEventData {
+  id: string;
+  role: 'assistant';
+  type: 'scenario_match_event';
+  data: { matches: Array<{ scenarioId: string; paths: string[] }> };
+}
+
+export interface ArchitectEventData {
+  id: string;
+  role: 'assistant';
+  type: 'architect_event';
+  data: { message: string };
+}
+
+export interface ArchitectureEventData {
+  id: string;
+  role: 'assistant';
+  type: 'architecture_event';
+  data: { architecture: string };
+}
+
 // 事件联合类型
-export type ConversationEvent = NormalEventData | TaskPlanEventData | ToolCallEventData | WaitingInputEventData | BDDEventData;
+export type ConversationEvent = NormalEventData | TaskPlanEventData | ToolCallEventData | WaitingInputEventData | BDDEventData | RagEventData | RagUsedEventData | RagDocEventData | ScenarioMatchEventData | ArchitectEventData | ArchitectureEventData;
 
 // Conversation 结构
 export interface Conversation {

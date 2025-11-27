@@ -279,14 +279,12 @@ export class ReActAgent {
             this.emitPlanUpdate(sessionId || 'default', conversationId || 'default', onStream, true);
           }
           
-          // 发送最终答案准备事件
-          this.emit('normal', {
-            content: '**准备答案** - 已收集足够信息，正在生成最终答案...'
-          }, sessionId || 'default', conversationId || 'default', `prepare_answer_${iteration}`, onStream);
-          
           // 使用流式生成最终答案
-          const finalAnswer = await this.generateFinalAnswer(context, onStream, conversationId, sessionId);
-          return { finalAnswer, isPaused: false };
+          if (this.config.autoGenerateFinalAnswer) {
+            const finalAnswer = await this.generateFinalAnswer(context, onStream, conversationId, sessionId);
+            return { finalAnswer, isPaused: false };
+          }
+          return { finalAnswer: reactResult.content || '', isPaused: false };
         }
 
         if (reactResult.type === 'action') {

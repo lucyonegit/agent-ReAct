@@ -3,6 +3,9 @@ import { SystemMessage, HumanMessage } from '@langchain/core/messages';
 import { CODING_AGENT_PROMPTS } from '../config/prompt.js';
 import { RagQueryTool, RagQueryAvailableComponents } from '../../agent/tools/collection/RagTool.js';
 import { Project } from '../types.js';
+import type { StreamEvent } from '../../agent/types/index.js';
+import { AgentConfig } from '../../agent/index.js';
+import { ArchitectGenerator } from '../architect/index.js';
 
 export class CodeGenerator {
     private llm: BaseChatModel;
@@ -13,7 +16,7 @@ export class CodeGenerator {
         this.llm = llm;
     }
 
-    async generate(bddScenarios: string, options?: {
+    async generate(config: AgentConfig, bddScenarios: string, options?: {
         onToolCall?: (payload: {
             id: string;
             status: 'start' | 'end';
@@ -30,12 +33,35 @@ export class CodeGenerator {
         onRagSources?: (sources: Array<{ content: string; metadata: Record<string, any> }>) => void;
         onRagDoc?: (payload: { component: string; section: 'API / Props' | 'Usage Example'; content: string }) => void;
         onScenarioMatches?: (matches: Array<{ scenarioId: string; paths: string[] }>) => void;
+        onArchitectLog?: (message: string) => void;
+        onArchitecture?: (architecture: string) => void;
+        onArchitectStream?: (event: StreamEvent) => void;
     }): Promise<Project> {
+        // step1 生成基础项目架构
+        options?.onThought?.('Action: 生成基础项目架构');
+        options?.onArchitectLog?.('开始调用 ArchitectGenerator 生成基础架构');
+        const architectGenerator = new ArchitectGenerator(this.llm, config);
+        const architect = await architectGenerator.generate(bddScenarios, {
+            onStream: (evt) => options?.onArchitectStream?.(evt),
+            onLog: (msg) => options?.onArchitectLog?.(msg)
+        });
+        const baseArch = (architect && architect.trim().length > 0) ? architect.trim() : '[]';
+        options?.onThought?.('Observation: 基础架构长度 ' + baseArch.length);
+        options?.onArchitectLog?.('基础架构生成完成，长度: ' + baseArch.length);
+        options?.onArchitecture?.(baseArch);
+
+        //
+
+        // step2 组件/代码编写
+
+        // 
         options?.onThought?.('Thought: 启动代码生成流程');
-        options?.onThought?.('Thought: 从BDD场景中提取潜在组件关键词用于检索');
+        options?.onThought?.('Thought: 从BDD输入（支持 Feature 分组）中提取潜在组件关键词用于检索');
         const kwStart = Date.now();
         options?.onToolCall?.({ id: `tool_extract_keywords_${kwStart}`, status: 'start', tool_name: 'extract_keywords', args: { input: 'bdd_scenarios' }, startedAt: kwStart });
-        const keywords = await this.extractKeywords(bddScenarios);
+        const keywordsFromBDD = await this.extractKeywords(bddScenarios);
+        const keywordsFromArch = await this.extractKeywords(baseArch);
+        const keywords = Array.from(new Set([...keywordsFromBDD, ...keywordsFromArch]));
         const kwEnd = Date.now();
         options?.onToolCall?.({ id: `tool_extract_keywords_${kwStart}`, status: 'end', tool_name: 'extract_keywords', args: { input: 'bdd_scenarios' }, result: { keywords }, success: true, startedAt: kwStart, finishedAt: kwEnd, durationMs: kwEnd - kwStart });
 
@@ -66,6 +92,7 @@ export class CodeGenerator {
         // 3. Generate Code
         const prompt = CODING_AGENT_PROMPTS.CODE_GENERATOR_PROMPT
             .replace('{bdd_scenarios}', bddScenarios)
+            .replace('{base_architecture}', baseArch)
             .replace('{rag_context}', ragContext);
 
         const messages = [
@@ -93,7 +120,8 @@ export class CodeGenerator {
 
             const project = JSON.parse(jsonStr) as Project;
             try {
-                const matches = await this.computeScenarioMatches(bddScenarios, project.files.map(f => f.path));
+                const flattened = this.flattenFeaturesToScenarios(bddScenarios);
+                const matches = await this.computeScenarioMatches(flattened, project.files.map(f => f.path));
                 options?.onScenarioMatches?.(matches);
             } catch {}
             return project;
@@ -110,6 +138,18 @@ export class CodeGenerator {
                 summary: 'Failed to parse structured output, returning raw content.'
             };
         }
+    }
+
+    private flattenFeaturesToScenarios(input: string): string {
+        try {
+            const data = JSON.parse(input);
+            if (Array.isArray(data) && data.length > 0 && typeof data[0] === 'object' && ('scenarios' in data[0])) {
+                const scenarios = data.flatMap((f: any) => Array.isArray(f.scenarios) ? f.scenarios : []);
+                return JSON.stringify(scenarios);
+            }
+            if (Array.isArray(data)) return JSON.stringify(data);
+        } catch {}
+        return input;
     }
 
     private async extractKeywords(text: string): Promise<string[]> {

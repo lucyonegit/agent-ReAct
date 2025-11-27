@@ -23,15 +23,35 @@ export class BDDDecomposer {
             const jsonMatch = content.match(/```json\n([\s\S]*?)\n```/) || content.match(/```\n([\s\S]*?)\n```/);
             const jsonStr = jsonMatch ? jsonMatch[1] : content;
             const arr = JSON.parse(jsonStr);
-            return Array.isArray(arr) ? arr : [];
+            if (Array.isArray(arr)) {
+                const looksLikeFeature = arr.length === 0 || typeof arr[0] === 'object' && ('scenarios' in arr[0] || 'feature_id' in arr[0] || 'feature_title' in arr[0]);
+                if (looksLikeFeature) return arr;
+                const scenarios = arr;
+                return [
+                    {
+                        feature_id: 'feature_1',
+                        feature_title: 'General',
+                        description: '',
+                        scenarios
+                    }
+                ];
+            }
+            return [];
         } catch {
             return [
                 {
-                    id: 'scenario_1',
-                    title: 'Fallback scenario',
-                    given: ['User opens the page'],
-                    when: ['User interacts with the component'],
-                    then: ['Expected UI updates occur']
+                    feature_id: 'feature_1',
+                    feature_title: 'General',
+                    description: '',
+                    scenarios: [
+                        {
+                            id: 'scenario_1',
+                            title: 'Fallback scenario',
+                            given: ['User opens the page'],
+                            when: ['User enters valid input'],
+                            then: ['Expected UI updates occur']
+                        }
+                    ]
                 }
             ];
         }

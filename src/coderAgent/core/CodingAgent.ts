@@ -116,16 +116,16 @@ export class CodingAgent {
 
         const bddTool: ToolDefinition = {
             name: 'decompose_bdd',
-            description: '将需求拆解为BDD场景（JSON数组）',
+            description: '将需求拆解为按 Feature 分组的 BDD（JSON 数组，含 scenarios）',
             parameters: [
                 { name: 'requirement', type: 'string', description: '需求文本', required: true, schema: z.string() }
             ],
             execute: async (toolInput: any) => {
-                const scenarios = await this.bddDecomposer.decompose(toolInput.requirement || input);
+                const features = await this.bddDecomposer.decompose(toolInput.requirement || input);
                 if (onStream) {
-                    onStream({ sessionId: options?.sessionId || 'default', conversationId: options?.conversationId || 'default', event: { id: this.genId('bdd_event'), role: 'assistant', type: 'bdd_event', data: { scenarios } }, timestamp: Date.now() });
+                    onStream({ sessionId: options?.sessionId || 'default', conversationId: options?.conversationId || 'default', event: { id: this.genId('bdd_event'), role: 'assistant', type: 'bdd_event', data: { features } }, timestamp: Date.now() });
                 }
-                return { scenarios };
+                return { features };
             }
         };
 
@@ -136,7 +136,7 @@ export class CodingAgent {
                 { name: 'bdd', type: 'string', description: 'BDD场景JSON字符串', required: true, schema: z.string() }
             ],
             execute: async (toolInput: any) => {
-                const project = await this.codeGenerator.generate(toolInput.bdd, {
+                const project = await this.codeGenerator.generate(this.config, toolInput.bdd, {
                     onThought: (content) => {
                         if (onStream) {
                             const id = this.genId('react_piece');
@@ -186,6 +186,19 @@ export class CodingAgent {
                         if (onStream && matches && matches.length > 0) {
                             onStream({ sessionId: options?.sessionId || 'default', conversationId: options?.conversationId || 'default', event: { id: this.genId('scenario_match'), role: 'assistant', type: 'scenario_match_event', data: { matches } }, timestamp: Date.now() });
                         }
+                    },
+                    onArchitectLog: (message) => {
+                        if (onStream) {
+                            onStream({ sessionId: options?.sessionId || 'default', conversationId: options?.conversationId || 'default', event: { id: this.genId('architect_log'), role: 'assistant', type: 'architect_event', data: { message } }, timestamp: Date.now() });
+                        }
+                    },
+                    onArchitecture: (architecture) => {
+                        if (onStream) {
+                            onStream({ sessionId: options?.sessionId || 'default', conversationId: options?.conversationId || 'default', event: { id: this.genId('architecture'), role: 'assistant', type: 'architecture_event', data: { architecture } }, timestamp: Date.now() });
+                        }
+                    },
+                    onArchitectStream: (evt) => {
+                        onStream?.(evt);
                     }
                 });
                 finalProject = project;
@@ -205,8 +218,16 @@ export class CodingAgent {
                     const steps: TaskStep[] = result.plan.steps.map((s: any) => ({ id: s.id, title: s.title, status: 'pending', note: s.description }));
                     onStream?.({ sessionId: evt.sessionId, conversationId: evt.conversationId, event: { id: this.genId('task_plan'), role: 'assistant', type: 'task_plan_event', data: { step: steps } }, timestamp: Date.now() });
                 }
-                if (toolName === 'decompose_bdd' && result?.scenarios) {
-                    onStream?.({ sessionId: evt.sessionId, conversationId: evt.conversationId, event: { id: this.genId('bdd_event'), role: 'assistant', type: 'bdd_event', data: { scenarios: result.scenarios } }, timestamp: Date.now() });
+                if (toolName === 'decompose_bdd' && (result?.features || result?.scenarios)) {
+                    const features = result?.features ?? [
+                        {
+                            feature_id: 'feature_1',
+                            feature_title: 'General',
+                            description: '',
+                            scenarios: result?.scenarios || []
+                        }
+                    ];
+                    onStream?.({ sessionId: evt.sessionId, conversationId: evt.conversationId, event: { id: this.genId('bdd_event'), role: 'assistant', type: 'bdd_event', data: { features } }, timestamp: Date.now() });
                 }
                 if (toolName === 'generate_code_project' && result?.project) {
                     const ragSources = this.codeGenerator.getRagSources();

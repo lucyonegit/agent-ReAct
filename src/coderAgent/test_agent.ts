@@ -18,7 +18,9 @@ async function main() {
         language: 'chinese',
         maxIterations: 10,
         streamOutput: true,
-        pauseAfterEachStep: false
+        pauseAfterEachStep: false,
+        autoPlanOnStart: false,
+        strictActionUntilDone: true
     };
 
     const agent = new CodingAgent(config);
@@ -31,10 +33,13 @@ async function main() {
     try {
         const result = await agent.run(input, {
             onStream: (event) => {
-                if (event.event === 'normal') {
-                    console.log(`[${event.eventId}] ${event.data.content}`);
-                } else if (event.event === 'error') {
-                    console.error(`[${event.eventId}] ${event.data.content}`);
+                const e: any = event.event;
+                if (e?.type === 'normal_event') {
+                    console.log(`[${e.id}] ${e.content}`);
+                } else if (e?.type === 'task_plan_event') {
+                    console.log(`[plan] steps: ${e.data.step.length}`);
+                } else if (e?.type === 'tool_call_event') {
+                    console.log(`[tool] ${e.data.tool_name} ${e.data.status}`);
                 }
             }
         });
