@@ -202,7 +202,6 @@ export class CodingAgent {
                     }
                 });
                 finalProject = project;
-                // 通用计划更新协议：标记“代码生成”步骤完成（按固定三步的 id）
                 return { project, planUpdate: { completeIds: ['step_3'], completeTitles: ['代码生成','code\s*gen'] } };
             }
         };

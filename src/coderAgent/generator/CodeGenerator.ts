@@ -38,43 +38,37 @@ export class CodeGenerator {
         onArchitectStream?: (event: StreamEvent) => void;
     }): Promise<Project> {
         // step1 生成基础项目架构
-        options?.onThought?.('Action: 生成基础项目架构');
-        options?.onArchitectLog?.('开始调用 ArchitectGenerator 生成基础架构');
+        options?.onThought?.('Action: 生成项目基础架构');
         const architectGenerator = new ArchitectGenerator(this.llm, config);
         const architect = await architectGenerator.generate(bddScenarios, {
             onStream: (evt) => options?.onArchitectStream?.(evt),
             onLog: (msg) => options?.onArchitectLog?.(msg)
         });
         const baseArch = (architect && architect.trim().length > 0) ? architect.trim() : '[]';
-        options?.onThought?.('Observation: 基础架构长度 ' + baseArch.length);
-        options?.onArchitectLog?.('基础架构生成完成，长度: ' + baseArch.length);
+        options?.onThought?.('Observation: 项目基础架构生成完毕');
         options?.onArchitecture?.(baseArch);
 
-        //
-
         // step2 组件/代码编写
-
-        // 
         options?.onThought?.('Thought: 启动代码生成流程');
-        options?.onThought?.('Thought: 从BDD输入（支持 Feature 分组）中提取潜在组件关键词用于检索');
         const kwStart = Date.now();
-        options?.onToolCall?.({ id: `tool_extract_keywords_${kwStart}`, status: 'start', tool_name: 'extract_keywords', args: { input: 'bdd_scenarios' }, startedAt: kwStart });
+        options?.onToolCall?.({ id: `tool_extract_keywords_${kwStart}`, status: 'start', tool_name: 'extract_keywords', args: { input: bddScenarios }, startedAt: kwStart });
         const keywordsFromBDD = await this.extractKeywords(bddScenarios);
         const keywordsFromArch = await this.extractKeywords(baseArch);
         const keywords = Array.from(new Set([...keywordsFromBDD, ...keywordsFromArch]));
         const kwEnd = Date.now();
         options?.onToolCall?.({ id: `tool_extract_keywords_${kwStart}`, status: 'end', tool_name: 'extract_keywords', args: { input: 'bdd_scenarios' }, result: { keywords }, success: true, startedAt: kwStart, finishedAt: kwEnd, durationMs: kwEnd - kwStart });
 
-        // 2. Get available internal components list
+        // 获取组件库列表
         options?.onThought?.('Action: 获取可用内部组件列表');
         const listStart = Date.now();
         options?.onToolCall?.({ id: `tool_list_components_${listStart}`, status: 'start', tool_name: 'list_internal_components', args: {}, startedAt: listStart });
         const available = await this.fetchAvailableComponents();
         const listEnd = Date.now();
         options?.onToolCall?.({ id: `tool_list_components_${listStart}`, status: 'end', tool_name: 'list_internal_components', args: {}, result: { available: available.slice(0, 20) }, success: true, startedAt: listStart, finishedAt: listEnd, durationMs: listEnd - listStart });
+
         options?.onThought?.('Observation: 可用组件列表: ' + JSON.stringify(available.slice(0, 8)));
 
-        // 3. Select components to use based on BDD keywords
+        // 选择与需求匹配的内部组件
         const selStart = Date.now();
         options?.onToolCall?.({ id: `tool_select_components_${selStart}`, status: 'start', tool_name: 'select_components', args: { keywords, available }, startedAt: selStart });
         const selected = this.selectComponentsFromBDD(keywords, available);
@@ -82,14 +76,14 @@ export class CodeGenerator {
         options?.onToolCall?.({ id: `tool_select_components_${selStart}`, status: 'end', tool_name: 'select_components', args: { keywords, available }, result: { selected }, success: true, startedAt: selStart, finishedAt: selEnd, durationMs: selEnd - selStart });
         options?.onThought?.('Thought: 选择与需求匹配的内部组件: ' + JSON.stringify(selected));
 
-        // 4. Fetch component docs (API/Props and Usage Example)
+        // 获取组件API与示例文档
         options?.onThought?.('Action: fetch_component_docs\nInput: { "components": ' + JSON.stringify(selected) + ' }');
 
         const ragContext = await this.fetchComponentDocs(selected, options);
         options?.onRagSources?.(this.getRagSources());
         options?.onThought?.('Observation: 已获取组件API与示例文档，开始代码生成');
 
-        // 3. Generate Code
+        // 代码生成
         const prompt = CODING_AGENT_PROMPTS.CODE_GENERATOR_PROMPT
             .replace('{bdd_scenarios}', bddScenarios)
             .replace('{base_architecture}', baseArch)
